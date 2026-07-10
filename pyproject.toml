@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "terra-map"
+version = "0.2.0"
+description = "Terra — layers above Cartograph. v0: validated map data captures."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Vinscen" }]
+
+[project.scripts]
+terra = "terra.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
