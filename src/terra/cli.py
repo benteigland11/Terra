@@ -254,13 +254,21 @@ def cmd_unknown_show(args: argparse.Namespace) -> int:
     if rec.get("probe_id") and rec.get("probe_id") not in pids:
         pids = [rec["probe_id"], *pids]
     print(f"probes: {', '.join(pids) if pids else '(none)'}")
-    if rec.get("type") == "number":
+    if rec.get("type") in ("number", "boolean"):
         st = rec.get("stats") or {}
-        print(
-            f"type: number  quantity={rec.get('quantity')}  "
-            f"n={st.get('n')}  mean={st.get('mean')}  std={st.get('std')}  "
-            f"confidence_derived={rec.get('confidence_derived')}"
-        )
+        if rec.get("type") == "boolean":
+            print(
+                f"type: boolean  quantity={rec.get('quantity')}  "
+                f"n={st.get('n')}  rate={st.get('rate')}  "
+                f"k_true={st.get('k_true')}  k_false={st.get('k_false')}  "
+                f"confidence_derived={rec.get('confidence_derived')}"
+            )
+        else:
+            print(
+                f"type: number  quantity={rec.get('quantity')}  "
+                f"n={st.get('n')}  mean={st.get('mean')}  std={st.get('std')}  "
+                f"confidence_derived={rec.get('confidence_derived')}"
+            )
     if rec.get("resolved_by"):
         print(f"resolved_by: {rec.get('resolved_by')}")
     runs = desc.get("linked_runs") or []
@@ -287,6 +295,7 @@ def cmd_known_create(args: argparse.Namespace) -> int:
             args.id,
             claim=args.claim,
             quantity=args.quantity,
+            map_type=getattr(args, "type", None) or "number",
             unit=args.unit or "",
             confidence=args.confidence,
             status=args.status,
@@ -301,9 +310,18 @@ def cmd_known_create(args: argparse.Namespace) -> int:
         print(f"initialized {root / '.terra' / 'map'}")
     rec = load_known(root, args.id)
     st = rec.get("stats") or {}
-    print(f"created known {args.id}  type=number  status={rec.get('status')}")
+    print(
+        f"created known {args.id}  type={rec.get('type')}  "
+        f"status={rec.get('status')}"
+    )
     print(f"  confidence={rec.get('confidence')}  derived={rec.get('confidence_derived')}")
-    print(f"  n={st.get('n')}  mean={st.get('mean')}  std={st.get('std')}")
+    if rec.get("type") == "boolean":
+        print(
+            f"  n={st.get('n')}  rate={st.get('rate')}  "
+            f"k_true={st.get('k_true')}  k_false={st.get('k_false')}"
+        )
+    else:
+        print(f"  n={st.get('n')}  mean={st.get('mean')}  std={st.get('std')}")
     print(f"  {path}")
     print("  next: terra known link-run …  then  terra known promote …")
     return 0
@@ -326,11 +344,14 @@ def cmd_known_list(args: argparse.Namespace) -> int:
         flag = "ok" if r["ok"] else "BAD"
         rec = r.get("record") or {}
         st = rec.get("stats") or {}
+        if rec.get("type") == "boolean":
+            stat_s = f"n={st.get('n')}  rate={st.get('rate')}"
+        else:
+            stat_s = f"n={st.get('n')}  mean={st.get('mean')}"
         print(
-            f"[{flag}] {r['id']}  {rec.get('status')}  "
+            f"[{flag}] {r['id']}  {rec.get('type')}  {rec.get('status')}  "
             f"conf={rec.get('confidence')}/{rec.get('confidence_derived')}  "
-            f"n={st.get('n')}  mean={st.get('mean')}  "
-            f"{rec.get('claim', '')[:50]}"
+            f"{stat_s}  {rec.get('claim', '')[:50]}"
         )
     return 0
 
@@ -354,10 +375,16 @@ def cmd_known_show(args: argparse.Namespace) -> int:
         f"confidence: claimed={rec.get('confidence')}  "
         f"derived={rec.get('confidence_derived')}"
     )
-    print(
-        f"stats: n={st.get('n')}  mean={st.get('mean')}  std={st.get('std')}  "
-        f"min={st.get('min')}  max={st.get('max')}"
-    )
+    if rec.get("type") == "boolean":
+        print(
+            f"stats: n={st.get('n')}  rate={st.get('rate')}  "
+            f"k_true={st.get('k_true')}  k_false={st.get('k_false')}"
+        )
+    else:
+        print(
+            f"stats: n={st.get('n')}  mean={st.get('mean')}  std={st.get('std')}  "
+            f"min={st.get('min')}  max={st.get('max')}"
+        )
     print(f"run_ids: {rec.get('run_ids') or []}")
     return 0
 
@@ -372,11 +399,18 @@ def cmd_known_link_run(args: argparse.Namespace) -> int:
         print(f"error: {e}", file=sys.stderr)
         return 1
     st = rec.get("stats") or {}
-    print(
-        f"known {rec['id']}  n={st.get('n')}  mean={st.get('mean')}  "
-        f"std={st.get('std')}  conf={rec.get('confidence')}/"
-        f"{rec.get('confidence_derived')}"
-    )
+    if rec.get("type") == "boolean":
+        print(
+            f"known {rec['id']}  n={st.get('n')}  rate={st.get('rate')}  "
+            f"k_true={st.get('k_true')}  conf={rec.get('confidence')}/"
+            f"{rec.get('confidence_derived')}"
+        )
+    else:
+        print(
+            f"known {rec['id']}  n={st.get('n')}  mean={st.get('mean')}  "
+            f"std={st.get('std')}  conf={rec.get('confidence')}/"
+            f"{rec.get('confidence_derived')}"
+        )
     return 0
 
 
@@ -1063,14 +1097,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_uc.add_argument(
         "--type",
         default=None,
-        choices=["number"],
+        choices=["number", "boolean"],
         dest="type",
-        help="Map type (number: samples → n/mean/std)",
+        help="Map type (number: mean±std; boolean: rate from true/false trials)",
     )
     p_uc.add_argument(
         "--quantity",
         default=None,
-        help="For type=number: stable measure name (e.g. hostile_count)",
+        help="For typed nodes: stable measure name (e.g. hostile_count, rcon_up)",
     )
     p_uc.add_argument("--unit", default="", help="Optional unit for number type")
     p_uc.add_argument(
@@ -1218,9 +1252,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     kn_sub = p_kn.add_subparsers(dest="known_cmd", required=True)
 
-    p_kc = kn_sub.add_parser("create", help="Create a number-typed known")
+    p_kc = kn_sub.add_parser("create", help="Create a typed known (number|boolean)")
     p_kc.add_argument("id", help="Slug id")
-    p_kc.add_argument("--claim", required=True, help="Falsifiable claim about quantity Q")
+    p_kc.add_argument("--claim", required=True, help="Falsifiable claim")
+    p_kc.add_argument(
+        "--type",
+        default="number",
+        choices=["number", "boolean"],
+        dest="type",
+        help="number (mean±std) or boolean (success rate)",
+    )
     p_kc.add_argument(
         "--quantity",
         required=True,

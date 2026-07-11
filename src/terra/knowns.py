@@ -1,4 +1,4 @@
-"""Knowns — typed anchors. First type: number (samples → n/mean/std)."""
+"""Knowns — typed anchors. Types: number, boolean."""
 
 from __future__ import annotations
 
@@ -13,9 +13,8 @@ from .number_type import (
     KNOWN_STATUSES,
     MAP_TYPES,
     can_claim_confidence,
-    derive_confidence,
     empty_stats,
-    recompute_number_node,
+    recompute_typed_node,
 )
 from .paths import ensure_knowns_store, known_path, knowns_root, run_dir
 from .probe_run import RUN_META_NAME
@@ -52,7 +51,7 @@ def validate_known_record(data: Any, *, expected_id: str | None = None) -> list[
     mtype = data.get("type")
     if mtype not in MAP_TYPES:
         blocks.append(
-            f"type must be one of {sorted(MAP_TYPES)} (v0: number only), got {mtype!r}"
+            f"type must be one of {sorted(MAP_TYPES)}, got {mtype!r}"
         )
 
     status = data.get("status")
@@ -67,18 +66,18 @@ def validate_known_record(data: Any, *, expected_id: str | None = None) -> list[
             f"confidence must be one of {sorted(CONFIDENCE_SET)}, got {conf!r}"
         )
 
-    if mtype == "number":
+    if mtype in ("number", "boolean"):
         q = data.get("quantity")
         if not isinstance(q, str) or not q.strip():
             blocks.append(
-                "type=number requires quantity (stable name for the scalar, "
-                "e.g. hostile_count)"
+                f"type={mtype} requires quantity (stable measure name, "
+                f"e.g. hostile_count or rcon_reachable)"
             )
         stats = data.get("stats")
         if stats is not None and not isinstance(stats, dict):
             blocks.append("stats must be an object when present")
         elif isinstance(stats, dict) and conf in CONFIDENCE_SET:
-            ok, msg = can_claim_confidence(stats, conf)
+            ok, msg = can_claim_confidence(stats, conf, map_type=mtype)
             if not ok:
                 blocks.append(msg)
 
@@ -100,6 +99,7 @@ def create_known(
     *,
     claim: str,
     quantity: str,
+    map_type: str = "number",
     unit: str = "",
     confidence: str = "low",
     status: str = "provisional",
@@ -111,8 +111,10 @@ def create_known(
         raise ValueError(f"known id {known_id!r} must match {_SLUG_RE.pattern}")
     if not claim or not str(claim).strip():
         raise ValueError("claim is required")
+    if map_type not in MAP_TYPES:
+        raise ValueError(f"type must be one of {sorted(MAP_TYPES)}")
     if not quantity or not str(quantity).strip():
-        raise ValueError("quantity is required for type=number")
+        raise ValueError(f"quantity is required for type={map_type}")
     if confidence not in CONFIDENCE_SET:
         raise ValueError(f"confidence must be one of {sorted(CONFIDENCE_SET)}")
     if status not in KNOWN_STATUSES:
@@ -127,17 +129,17 @@ def create_known(
     record: dict[str, Any] = {
         "schema_version": KNOWN_SCHEMA_VERSION,
         "id": known_id,
-        "type": "number",
+        "type": map_type,
         "role": "known",
         "claim": claim.strip(),
         "quantity": quantity.strip(),
         "unit": (unit or "").strip(),
         "status": status,
-        "confidence": "low",  # always start low; promote after samples
+        "confidence": "low",
         "run_ids": [run_id] if run_id else [],
         "probe_ids": [],
         "primary_run_id": run_id,
-        "stats": empty_stats(),
+        "stats": empty_stats(map_type),
         "confidence_derived": "low",
         "notes": notes or "",
         "created_at": now,
@@ -146,13 +148,14 @@ def create_known(
     if run_id:
         if not (run_dir(project_root, run_id) / RUN_META_NAME).is_file():
             raise FileNotFoundError(f"run not found: {run_id}")
-        record = recompute_number_node(
+        record = recompute_typed_node(
             record, project_root=project_root, run_dir_fn=run_dir
         )
-        ok, _ = can_claim_confidence(record["stats"], confidence)
+        ok, _ = can_claim_confidence(
+            record["stats"], confidence, map_type=map_type
+        )
         if ok:
             record["confidence"] = confidence
-        # else stay at capped value from recompute
 
     blocks = validate_known_record(record, expected_id=known_id)
     if blocks:
@@ -173,8 +176,8 @@ def save_known(project_root: Path, record: dict[str, Any]) -> Path:
     kid = record["id"]
     record = dict(record)
     record["updated_at"] = _now()
-    if record.get("type") == "number":
-        record = recompute_number_node(
+    if record.get("type") in MAP_TYPES:
+        record = recompute_typed_node(
             record, project_root=project_root, run_dir_fn=run_dir
         )
     blocks = validate_known_record(record, expected_id=kid)
@@ -202,7 +205,6 @@ def link_run_known(
     rec["run_ids"] = rids
     if primary or rec.get("primary_run_id") is None:
         rec["primary_run_id"] = run_id
-    # seed probe from run
     try:
         meta = json.loads(
             (run_dir(project_root, run_id) / RUN_META_NAME).read_text(encoding="utf-8")
@@ -215,8 +217,6 @@ def link_run_known(
             rec["probe_ids"] = pids
     except (json.JSONDecodeError, OSError):
         pass
-    if rec.get("status") == "provisional" and rec.get("stats", {}).get("n", 0) >= 1:
-        pass  # stays provisional until promote
     save_known(project_root, rec)
     return load_known(project_root, known_id)
 
@@ -228,12 +228,13 @@ def promote_known(
     *,
     status: str | None = None,
 ) -> dict[str, Any]:
-    """Raise claimed confidence only if sample ladder allows."""
     if confidence not in CONFIDENCE_SET:
         raise ValueError(f"confidence must be one of {sorted(CONFIDENCE_SET)}")
     rec = load_known(project_root, known_id)
-    rec = recompute_number_node(rec, project_root=project_root, run_dir_fn=run_dir)
-    ok, msg = can_claim_confidence(rec["stats"], confidence)
+    rec = recompute_typed_node(rec, project_root=project_root, run_dir_fn=run_dir)
+    ok, msg = can_claim_confidence(
+        rec["stats"], confidence, map_type=rec.get("type")
+    )
     if not ok:
         raise ValueError(msg)
     rec["confidence"] = confidence
@@ -272,8 +273,8 @@ def list_knowns(project_root: Path) -> list[dict[str, Any]]:
     for path in sorted(root.glob("*.json")):
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-            if data.get("type") == "number":
-                data = recompute_number_node(
+            if data.get("type") in MAP_TYPES:
+                data = recompute_typed_node(
                     data, project_root=project_root, run_dir_fn=run_dir
                 )
         except (json.JSONDecodeError, OSError) as e:
@@ -301,8 +302,8 @@ def validate_known_file(project_root: Path, known_id: str) -> dict[str, Any]:
             "record": None,
         }
     data = json.loads(path.read_text(encoding="utf-8"))
-    if data.get("type") == "number":
-        data = recompute_number_node(
+    if data.get("type") in MAP_TYPES:
+        data = recompute_typed_node(
             data, project_root=project_root, run_dir_fn=run_dir
         )
     blocks = validate_known_record(data, expected_id=known_id)
@@ -317,8 +318,8 @@ def validate_known_file(project_root: Path, known_id: str) -> dict[str, Any]:
 
 def describe_known(project_root: Path, known_id: str) -> dict[str, Any]:
     rec = load_known(project_root, known_id)
-    if rec.get("type") == "number":
-        rec = recompute_number_node(
+    if rec.get("type") in MAP_TYPES:
+        rec = recompute_typed_node(
             rec, project_root=project_root, run_dir_fn=run_dir
         )
     return {"record": rec}

@@ -79,8 +79,9 @@ return {
     "to": to,                    # non-empty target
     "status": "ok",              # prefer: ok|degraded|unavailable|empty|error
     "artifacts": [{"path": str(p), "role": "out"}],
-    "measures": [                # REQUIRED for number-typed map nodes
-        {"quantity": "hostile_count", "value": 3},
+    "measures": [                # REQUIRED for typed map nodes
+        {"quantity": "hostile_count", "value": 3},      # number
+        # {"quantity": "rcon_up", "value": True},       # boolean
     ],
 }
 ```
