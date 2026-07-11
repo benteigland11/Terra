@@ -72,12 +72,15 @@ def run(ctx: dict[str, Any] | None = None) -> dict[str, Any]:
     out = Path(__file__).resolve().parent / "_last_reading.txt"
     out.write_text(json.dumps({{"to": to, "note": "scaffold stub"}}, indent=2) + "\\n")
     # Prefer recommended status vocab: ok|degraded|unavailable|empty|error
+    # Optional measures feed number-typed knowns/unknowns:
+    #   "measures": [{{"quantity": "hostile_count", "value": 3}}]
     return {{
         "to": to,
         "status": "ok",
         "artifacts": [
             {{"path": str(out), "role": "summary"}},
         ],
+        "measures": [],
     }}
 
 

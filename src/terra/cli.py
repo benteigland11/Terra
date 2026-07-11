@@ -31,6 +31,17 @@ from .probe_validate import (
     validate_probe_script,
 )
 from .run_validate import validate_all_runs, validate_run_id
+from .knowns import (
+    create_known,
+    describe_known,
+    link_run_known,
+    list_knowns,
+    load_known,
+    promote_known,
+    set_known_status,
+    validate_known_file,
+)
+from .number_type import CONFIDENCE_SET, KNOWN_STATUSES
 from .suites import (
     create_suite,
     list_suites,
@@ -168,6 +179,9 @@ def cmd_unknown_create(args: argparse.Namespace) -> int:
             probe_id=args.probe,
             notes=args.notes or "",
             force=args.force,
+            map_type=getattr(args, "type", None),
+            quantity=getattr(args, "quantity", None),
+            unit=getattr(args, "unit", "") or "",
         )
     except (ValueError, FileExistsError, OSError) as e:
         print(f"error: {e}", file=sys.stderr)
@@ -240,6 +254,13 @@ def cmd_unknown_show(args: argparse.Namespace) -> int:
     if rec.get("probe_id") and rec.get("probe_id") not in pids:
         pids = [rec["probe_id"], *pids]
     print(f"probes: {', '.join(pids) if pids else '(none)'}")
+    if rec.get("type") == "number":
+        st = rec.get("stats") or {}
+        print(
+            f"type: number  quantity={rec.get('quantity')}  "
+            f"n={st.get('n')}  mean={st.get('mean')}  std={st.get('std')}  "
+            f"confidence_derived={rec.get('confidence_derived')}"
+        )
     if rec.get("resolved_by"):
         print(f"resolved_by: {rec.get('resolved_by')}")
     runs = desc.get("linked_runs") or []
@@ -256,6 +277,165 @@ def cmd_unknown_show(args: argparse.Namespace) -> int:
                 f"{r.get('captured_at') or ''}"
             )
     return 0
+
+
+def cmd_known_create(args: argparse.Namespace) -> int:
+    try:
+        root, created = ensure_project_root()
+        path = create_known(
+            root,
+            args.id,
+            claim=args.claim,
+            quantity=args.quantity,
+            unit=args.unit or "",
+            confidence=args.confidence,
+            status=args.status,
+            run_id=args.from_run,
+            notes=args.notes or "",
+            force=args.force,
+        )
+    except (ValueError, FileExistsError, FileNotFoundError, OSError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    if created:
+        print(f"initialized {root / '.terra' / 'map'}")
+    rec = load_known(root, args.id)
+    st = rec.get("stats") or {}
+    print(f"created known {args.id}  type=number  status={rec.get('status')}")
+    print(f"  confidence={rec.get('confidence')}  derived={rec.get('confidence_derived')}")
+    print(f"  n={st.get('n')}  mean={st.get('mean')}  std={st.get('std')}")
+    print(f"  {path}")
+    print("  next: terra known link-run …  then  terra known promote …")
+    return 0
+
+
+def cmd_known_list(args: argparse.Namespace) -> int:
+    try:
+        root = require_project_root()
+    except FileNotFoundError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    rows = list_knowns(root)
+    if args.json:
+        print(json.dumps(rows, indent=2, default=str))
+        return 0
+    if not rows:
+        print("(no knowns)")
+        return 0
+    for r in rows:
+        flag = "ok" if r["ok"] else "BAD"
+        rec = r.get("record") or {}
+        st = rec.get("stats") or {}
+        print(
+            f"[{flag}] {r['id']}  {rec.get('status')}  "
+            f"conf={rec.get('confidence')}/{rec.get('confidence_derived')}  "
+            f"n={st.get('n')}  mean={st.get('mean')}  "
+            f"{rec.get('claim', '')[:50]}"
+        )
+    return 0
+
+
+def cmd_known_show(args: argparse.Namespace) -> int:
+    try:
+        root = require_project_root()
+        desc = describe_known(root, args.id)
+    except (FileNotFoundError, OSError, json.JSONDecodeError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    rec = desc["record"]
+    if args.json:
+        print(json.dumps(rec, indent=2, sort_keys=True, default=str))
+        return 0
+    st = rec.get("stats") or {}
+    print(f"known {rec.get('id')}  type={rec.get('type')}  status={rec.get('status')}")
+    print(f"claim: {rec.get('claim')}")
+    print(f"quantity: {rec.get('quantity')}  unit={rec.get('unit') or '—'}")
+    print(
+        f"confidence: claimed={rec.get('confidence')}  "
+        f"derived={rec.get('confidence_derived')}"
+    )
+    print(
+        f"stats: n={st.get('n')}  mean={st.get('mean')}  std={st.get('std')}  "
+        f"min={st.get('min')}  max={st.get('max')}"
+    )
+    print(f"run_ids: {rec.get('run_ids') or []}")
+    return 0
+
+
+def cmd_known_link_run(args: argparse.Namespace) -> int:
+    try:
+        root = require_project_root()
+        rec = link_run_known(
+            root, args.id, args.run_id, primary=bool(args.primary)
+        )
+    except (ValueError, FileNotFoundError, OSError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    st = rec.get("stats") or {}
+    print(
+        f"known {rec['id']}  n={st.get('n')}  mean={st.get('mean')}  "
+        f"std={st.get('std')}  conf={rec.get('confidence')}/"
+        f"{rec.get('confidence_derived')}"
+    )
+    return 0
+
+
+def cmd_known_promote(args: argparse.Namespace) -> int:
+    try:
+        root = require_project_root()
+        rec = promote_known(
+            root,
+            args.id,
+            args.confidence,
+            status=args.status,
+        )
+    except (ValueError, FileNotFoundError, OSError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    print(
+        f"known {rec['id']}  confidence={rec.get('confidence')}  "
+        f"status={rec.get('status')}  derived={rec.get('confidence_derived')}"
+    )
+    return 0
+
+
+def cmd_known_status(args: argparse.Namespace) -> int:
+    try:
+        root = require_project_root()
+        rec = set_known_status(root, args.id, args.status, notes=args.notes)
+    except (ValueError, FileNotFoundError, OSError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    print(f"known {rec['id']}  status={rec['status']}")
+    return 0
+
+
+def cmd_known_validate(args: argparse.Namespace) -> int:
+    try:
+        root = require_project_root()
+    except FileNotFoundError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    if args.id:
+        result = validate_known_file(root, args.id)
+        if args.json:
+            print(json.dumps(result, indent=2, default=str))
+            return 0 if result["ok"] else 1
+        status = "ok" if result["ok"] else "FAIL"
+        print(f"[{status}] {result.get('id')}")
+        for b in result.get("blocks") or []:
+            print(f"  block: {b}")
+        print("PASS" if result["ok"] else "FAIL")
+        return 0 if result["ok"] else 1
+    rows = list_knowns(root)
+    ok = all(r["ok"] for r in rows) if rows else True
+    for r in rows:
+        status = "ok" if r["ok"] else "FAIL"
+        print(f"[{status}] {r['id']}")
+        for b in r.get("blocks") or []:
+            print(f"  block: {b}")
+    print("PASS" if ok else "FAIL")
+    return 0 if ok else 1
 
 
 def cmd_unknown_status(args: argparse.Namespace) -> int:
@@ -881,6 +1061,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="What reading would resolve this (required content for open status)",
     )
     p_uc.add_argument(
+        "--type",
+        default=None,
+        choices=["number"],
+        dest="type",
+        help="Map type (number: samples → n/mean/std)",
+    )
+    p_uc.add_argument(
+        "--quantity",
+        default=None,
+        help="For type=number: stable measure name (e.g. hostile_count)",
+    )
+    p_uc.add_argument("--unit", default="", help="Optional unit for number type")
+    p_uc.add_argument(
         "--no-blocks-build",
         action="store_true",
         help="Do not mark as blocking product build (default: blocks_build=true)",
@@ -1017,6 +1210,82 @@ def build_parser() -> argparse.ArgumentParser:
     p_sv.add_argument("id", nargs="?", default=None, help="Suite id or omit for all")
     p_sv.add_argument("--json", action="store_true")
     p_sv.set_defaults(func=cmd_suite_validate)
+
+    # --- knowns (typed anchors; first type: number) ---
+    p_kn = sub.add_parser(
+        "known",
+        help="Typed anchors (number: mean±std from samples; n=1 cannot be high)",
+    )
+    kn_sub = p_kn.add_subparsers(dest="known_cmd", required=True)
+
+    p_kc = kn_sub.add_parser("create", help="Create a number-typed known")
+    p_kc.add_argument("id", help="Slug id")
+    p_kc.add_argument("--claim", required=True, help="Falsifiable claim about quantity Q")
+    p_kc.add_argument(
+        "--quantity",
+        required=True,
+        help="Stable measure name probes put in measures[]",
+    )
+    p_kc.add_argument("--unit", default="", help="Optional unit")
+    p_kc.add_argument(
+        "--confidence",
+        default="low",
+        choices=sorted(CONFIDENCE_SET),
+        help="Claimed confidence (capped by sample ladder; default low)",
+    )
+    p_kc.add_argument(
+        "--status",
+        default="provisional",
+        choices=sorted(KNOWN_STATUSES),
+    )
+    p_kc.add_argument("--from-run", default=None, dest="from_run", help="Seed with a run id")
+    p_kc.add_argument("--notes", default="")
+    p_kc.add_argument("--force", action="store_true")
+    p_kc.set_defaults(func=cmd_known_create)
+
+    p_kl = kn_sub.add_parser("list", help="List knowns")
+    p_kl.add_argument("--json", action="store_true")
+    p_kl.set_defaults(func=cmd_known_list)
+
+    p_ks = kn_sub.add_parser("show", help="Show known + stats")
+    p_ks.add_argument("id")
+    p_ks.add_argument("--json", action="store_true")
+    p_ks.set_defaults(func=cmd_known_show)
+
+    p_klr = kn_sub.add_parser("link-run", help="Add a sample run; recompute n/mean/std")
+    p_klr.add_argument("id")
+    p_klr.add_argument("run_id")
+    p_klr.add_argument("--primary", action="store_true")
+    p_klr.set_defaults(func=cmd_known_link_run)
+
+    p_kp = kn_sub.add_parser(
+        "promote",
+        help="Raise confidence only if sample ladder allows (blocks n=1 high)",
+    )
+    p_kp.add_argument("id")
+    p_kp.add_argument(
+        "confidence",
+        choices=sorted(CONFIDENCE_SET),
+        help="Target confidence",
+    )
+    p_kp.add_argument(
+        "--status",
+        default=None,
+        choices=sorted(KNOWN_STATUSES),
+        help="Optional status (default: active when med/high from provisional)",
+    )
+    p_kp.set_defaults(func=cmd_known_promote)
+
+    p_kst = kn_sub.add_parser("status", help="Set known status")
+    p_kst.add_argument("id")
+    p_kst.add_argument("status", choices=sorted(KNOWN_STATUSES))
+    p_kst.add_argument("--notes", default=None)
+    p_kst.set_defaults(func=cmd_known_status)
+
+    p_kv = kn_sub.add_parser("validate", help="Validate known(s); recompute stats")
+    p_kv.add_argument("id", nargs="?", default=None)
+    p_kv.add_argument("--json", action="store_true")
+    p_kv.set_defaults(func=cmd_known_validate)
 
     return p
 

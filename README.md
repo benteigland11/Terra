@@ -11,9 +11,10 @@ Layers **above** Cartograph. v0 focus: **map probes** (instruments), not full pl
 ## Install
 
 ```bash
-pip install -e /path/to/Terra
-terra --version   # terra 0.1.0
+pip install -e ~/Cartograph/Terra
+terra --version
 ```
+# Lives next to Cartograph for now; own git history (not pushed).
 
 Global agent skill (Grok): `terra-map` under `~/.grok/skills/terra-map/`.
 
@@ -70,6 +71,18 @@ See [docs/to-schema.md](docs/to-schema.md). Probes may ignore extra keys.
 **Recommended `status`:** `ok` | `degraded` | `unavailable` | `empty` | `error`  
 (freeform still allowed; live runs warn). Filter: `terra run list --status unavailable`.  
 See [docs/status-vocab.md](docs/status-vocab.md).
+
+**Knowns** (typed anchors; first type **number**):
+
+```bash
+# probe returns measures: [{"quantity":"hostile_count","value":3}]
+terra known create est --claim "…" --quantity hostile_count --from-run <run_id>
+terra known link-run est <run_id2>
+terra known promote est med   # blocks if n too small
+terra known show est          # n, mean, std
+```
+
+Unknowns can also be `--type number --quantity q` (same stats on link-run).
 
 **Suites** (ordered recipes, shared `to` — not domain plugins):
 

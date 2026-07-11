@@ -11,6 +11,7 @@ UNKNOWNS_DIRNAME = "unknowns"
 RUNS_DIRNAME = "runs"
 LIB_DIRNAME = "lib"
 SUITES_DIRNAME = "suites"
+KNOWNS_DIRNAME = "knowns"
 # Legacy experimental capture store — not the product path (probes + unknowns + runs are)
 DATA_DIRNAME = "data"
 
@@ -150,10 +151,33 @@ def ensure_suites_store(project_root: Path) -> Path:
     return root
 
 
+def knowns_root(project_root: Path) -> Path:
+    return map_root(project_root) / KNOWNS_DIRNAME
+
+
+def known_path(project_root: Path, known_id: str) -> Path:
+    return knowns_root(project_root) / f"{known_id}.json"
+
+
+def ensure_knowns_store(project_root: Path) -> Path:
+    root = knowns_root(project_root)
+    root.mkdir(parents=True, exist_ok=True)
+    readme = root / "README.md"
+    if not readme.exists():
+        readme.write_text(
+            "# Map knowns (typed anchors)\n\n"
+            "Beliefs with structure. First type: **number** (mean ± std from samples).\n"
+            "Create with `terra known create <id> --type number --claim \"…\" --quantity q`.\n",
+            encoding="utf-8",
+        )
+    return root
+
+
 def ensure_map_store(project_root: Path) -> Path:
-    """Create full map store (probes + unknowns + runs + lib + suites)."""
+    """Create full map store."""
     ensure_probes_store(project_root)
     ensure_unknowns_store(project_root)
+    ensure_knowns_store(project_root)
     ensure_runs_store(project_root)
     ensure_map_lib(project_root)
     ensure_suites_store(project_root)

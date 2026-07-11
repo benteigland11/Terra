@@ -282,6 +282,7 @@ def run_probe(
         "to": raw.get("to"),
         "status": raw.get("status"),
         "artifacts": artifacts,
+        "measures": raw.get("measures") if isinstance(raw.get("measures"), list) else [],
         "dry_run": bool(dry_run),
         "timeout_s": float(timeout_eff),
         "probe_purpose": meta.get("purpose"),

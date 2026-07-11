@@ -8,6 +8,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .number_type import (
+    CONFIDENCE_SET,
+    MAP_TYPES,
+    empty_stats,
+    recompute_number_node,
+)
 from .paths import (
     ensure_unknowns_store,
     run_dir,
@@ -41,6 +47,9 @@ def create_unknown(
     probe_id: str | None = None,
     notes: str = "",
     force: bool = False,
+    map_type: str | None = None,
+    quantity: str | None = None,
+    unit: str = "",
 ) -> Path:
     if not _SLUG_RE.match(unknown_id):
         raise ValueError(
@@ -53,6 +62,13 @@ def create_unknown(
     path = unknown_path(project_root, unknown_id)
     if path.exists() and not force:
         raise FileExistsError(f"unknown already exists: {path}")
+
+    if map_type is not None and map_type not in MAP_TYPES:
+        raise ValueError(
+            f"type must be one of {sorted(MAP_TYPES)} or omitted, got {map_type!r}"
+        )
+    if map_type == "number" and (not quantity or not str(quantity).strip()):
+        raise ValueError("type=number requires --quantity")
 
     now = _now()
     # create with --probe behaves like link-probe (probing, not open)
@@ -74,6 +90,12 @@ def create_unknown(
         "created_at": now,
         "updated_at": now,
     }
+    if map_type == "number":
+        record["type"] = "number"
+        record["quantity"] = quantity.strip()
+        record["unit"] = (unit or "").strip()
+        record["stats"] = empty_stats()
+        record["confidence_derived"] = "low"
     blocks = validate_unknown_record(record, expected_id=unknown_id)
     if blocks:
         raise ValueError("invalid unknown:\n  - " + "\n  - ".join(blocks))
@@ -93,6 +115,10 @@ def save_unknown(project_root: Path, record: dict[str, Any]) -> Path:
     uid = record["id"]
     record = dict(record)
     record["updated_at"] = _now()
+    if record.get("type") == "number":
+        record = recompute_number_node(
+            record, project_root=project_root, run_dir_fn=run_dir
+        )
     blocks = validate_unknown_record(record, expected_id=uid)
     if blocks:
         raise ValueError("invalid unknown:\n  - " + "\n  - ".join(blocks))
@@ -187,6 +213,10 @@ def link_run(
                 rec["probe_id"] = pid
     except (json.JSONDecodeError, OSError):
         pass
+    if rec.get("type") == "number":
+        rec = recompute_number_node(
+            rec, project_root=project_root, run_dir_fn=run_dir
+        )
     save_unknown(project_root, rec)
     return rec
 
@@ -206,6 +236,10 @@ def unlink_run(
 def describe_unknown(project_root: Path, unknown_id: str) -> dict[str, Any]:
     """Record plus expanded linked runs (for show)."""
     rec = load_unknown(project_root, unknown_id)
+    if rec.get("type") == "number":
+        rec = recompute_number_node(
+            rec, project_root=project_root, run_dir_fn=run_dir
+        )
     runs_out: list[dict[str, Any]] = []
     for rid in rec.get("run_ids") or []:
         meta_path = _run_meta_path(project_root, rid)
