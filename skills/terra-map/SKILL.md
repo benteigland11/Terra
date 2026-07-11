@@ -4,11 +4,11 @@ description: >
   REQUIRED for Terra map middleware and opaque domains: modded Minecraft, game
   engines, hardware, weird runtimes, "how does this world work", thrashing APIs,
   freehand from training data, or any work that needs survey before code.
-  Covers unknowns, knowns (typed; number = n/mean/std), probes, stamped runs,
-  suites, link-run, promote ladder (n=1 cannot be high confidence). Prefer this
-  loop over silent guessing. Does NOT replace Cartograph widgets (bricks) —
-  Terra is the map (understand). Fire on Terra CLI, fog, probes, knowns/unknowns,
-  Minecraft/mod dev, or "looks good" after one sample.
+  Covers unknowns, knowns (typed: number = n/mean/std, boolean = rate),
+  probes, stamped runs, suites, link-run, promote ladder (n=1 cannot be high).
+  Prefer this loop over silent guessing. Does NOT replace Cartograph widgets
+  (bricks) — Terra is the map (understand). Fire on Terra CLI, fog, probes,
+  knowns/unknowns, Minecraft/mod dev, or "looks good" after one sample.
 ---
 
 # terra-map — map middleware above Cartograph
@@ -23,14 +23,14 @@ description: >
 
 1. Under fog: do **not** freehand the domain.  
 2. **Probes are open** (infinite instruments). **Knowns/unknowns are typed** (finite).  
-3. First type: **`number`** — samples in, substrate **n / mean / std** out.  
+3. Types: **`number`** (mean±std), **`boolean`** (rate from true/false trials).  
 4. Validate alone ≠ surveyed. **Run + link** is the reading.  
 5. Resolve unknown ≠ encode high known. n=1 cannot `promote high`.
 
 CLI: `pip install -e ~/Cartograph/Terra` → `terra`.  
 Store (in the project under survey): `.terra/map/`.
 
-Docs in the Terra repo: `docs/number-type.md`, `docs/watch-duration.md`,
+Docs: `docs/number-type.md`, `docs/boolean-type.md`, `docs/watch-duration.md`,
 `docs/to-schema.md`, `docs/status-vocab.md`, `docs/unknowns.md`, `docs/suites.md`.
 
 ---
@@ -133,19 +133,14 @@ terra known show <slug>                  # n, mean, std
 
 ---
 
-## Number type (shared by known + unknown)
+## Typed knowns/unknowns (number + boolean)
 
-| | |
-| - | - |
-| Input | linked runs with `measures` matching `quantity` |
-| Substrate | recomputes `stats.n`, `mean`, `std` (null if n&lt;2), min/max |
-| Confidence | **derived** ladder; claimed confidence capped |
-
-| derived | when |
-| ------- | ---- |
-| **low** | n ≥ 1 |
-| **med** | n ≥ 3 **or** (n ≥ 2 and std defined) |
-| **high** | n ≥ 5 and std defined and std/\|mean\| ≤ 0.5 (or both 0) |
+| | **number** | **boolean** |
+| - | ---------- | ----------- |
+| measures value | float | true/false (or 0/1) |
+| stats | n, mean, std | n, k_true, k_false, **rate** |
+| med | n≥3 or (n≥2 + std) | n≥3 |
+| high | n≥5 + tight std/mean | n≥5 + unanimous rate 0 or 1 |
 
 `terra known promote <id> high` **blocks** until the ladder allows it.
 
