@@ -1,4 +1,7 @@
-"""Knowns — typed anchors. Types: number, boolean."""
+"""Knowns — typed anchors. Types: number, boolean (scalar filters only).
+
+Multi/sequence evidence lives one layer up: ``terra.plans`` / ``terra plan``.
+"""
 
 from __future__ import annotations
 
@@ -8,10 +11,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .formula_type import (
+    empty_formula_stats,
+    parse_vars_arg,
+    validate_formula_fields,
+)
 from .number_type import (
     CONFIDENCE_SET,
     KNOWN_STATUSES,
     MAP_TYPES,
+    SCALAR_TYPES,
     can_claim_confidence,
     empty_stats,
     recompute_typed_node,
@@ -66,7 +75,7 @@ def validate_known_record(data: Any, *, expected_id: str | None = None) -> list[
             f"confidence must be one of {sorted(CONFIDENCE_SET)}, got {conf!r}"
         )
 
-    if mtype in ("number", "boolean"):
+    if mtype in SCALAR_TYPES:
         q = data.get("quantity")
         if not isinstance(q, str) or not q.strip():
             blocks.append(
@@ -78,6 +87,17 @@ def validate_known_record(data: Any, *, expected_id: str | None = None) -> list[
             blocks.append("stats must be an object when present")
         elif isinstance(stats, dict) and conf in CONFIDENCE_SET:
             ok, msg = can_claim_confidence(stats, conf, map_type=mtype)
+            if not ok:
+                blocks.append(msg)
+    elif mtype == "formula":
+        blocks.extend(
+            validate_formula_fields(data.get("expression"), data.get("vars"))
+        )
+        stats = data.get("stats")
+        if stats is not None and not isinstance(stats, dict):
+            blocks.append("stats must be an object when present")
+        elif isinstance(stats, dict) and conf in CONFIDENCE_SET:
+            ok, msg = can_claim_confidence(stats, conf, map_type="formula")
             if not ok:
                 blocks.append(msg)
 
@@ -98,7 +118,7 @@ def create_known(
     known_id: str,
     *,
     claim: str,
-    quantity: str,
+    quantity: str | None = None,
     map_type: str = "number",
     unit: str = "",
     confidence: str = "low",
@@ -106,15 +126,18 @@ def create_known(
     run_id: str | None = None,
     notes: str = "",
     force: bool = False,
+    expression: str | None = None,
+    vars: dict[str, Any] | list[str] | str | None = None,
 ) -> Path:
     if not _SLUG_RE.match(known_id):
         raise ValueError(f"known id {known_id!r} must match {_SLUG_RE.pattern}")
     if not claim or not str(claim).strip():
         raise ValueError("claim is required")
     if map_type not in MAP_TYPES:
-        raise ValueError(f"type must be one of {sorted(MAP_TYPES)}")
-    if not quantity or not str(quantity).strip():
-        raise ValueError(f"quantity is required for type={map_type}")
+        raise ValueError(
+            f"type must be one of {sorted(MAP_TYPES)} "
+            f"(use `terra plan` for multi/sequence evidence)"
+        )
     if confidence not in CONFIDENCE_SET:
         raise ValueError(f"confidence must be one of {sorted(CONFIDENCE_SET)}")
     if status not in KNOWN_STATUSES:
@@ -126,25 +149,53 @@ def create_known(
         raise FileExistsError(f"known already exists: {path}")
 
     now = _now()
-    record: dict[str, Any] = {
-        "schema_version": KNOWN_SCHEMA_VERSION,
-        "id": known_id,
-        "type": map_type,
-        "role": "known",
-        "claim": claim.strip(),
-        "quantity": quantity.strip(),
-        "unit": (unit or "").strip(),
-        "status": status,
-        "confidence": "low",
-        "run_ids": [run_id] if run_id else [],
-        "probe_ids": [],
-        "primary_run_id": run_id,
-        "stats": empty_stats(map_type),
-        "confidence_derived": "low",
-        "notes": notes or "",
-        "created_at": now,
-        "updated_at": now,
-    }
+    if map_type == "formula":
+        vars_spec = parse_vars_arg(vars)
+        expr = (expression or "").strip()
+        ferr = validate_formula_fields(expr, vars_spec)
+        if ferr:
+            raise ValueError("invalid formula:\n  - " + "\n  - ".join(ferr))
+        record: dict[str, Any] = {
+            "schema_version": KNOWN_SCHEMA_VERSION,
+            "id": known_id,
+            "type": "formula",
+            "role": "known",
+            "claim": claim.strip(),
+            "expression": expr,
+            "vars": vars_spec,
+            "status": status,
+            "confidence": "low",
+            "run_ids": [run_id] if run_id else [],
+            "probe_ids": [],
+            "primary_run_id": run_id,
+            "stats": empty_formula_stats(),
+            "confidence_derived": "low",
+            "notes": notes or "",
+            "created_at": now,
+            "updated_at": now,
+        }
+    else:
+        if not quantity or not str(quantity).strip():
+            raise ValueError(f"quantity is required for type={map_type}")
+        record = {
+            "schema_version": KNOWN_SCHEMA_VERSION,
+            "id": known_id,
+            "type": map_type,
+            "role": "known",
+            "claim": claim.strip(),
+            "quantity": quantity.strip(),
+            "unit": (unit or "").strip(),
+            "status": status,
+            "confidence": "low",
+            "run_ids": [run_id] if run_id else [],
+            "probe_ids": [],
+            "primary_run_id": run_id,
+            "stats": empty_stats(map_type),
+            "confidence_derived": "low",
+            "notes": notes or "",
+            "created_at": now,
+            "updated_at": now,
+        }
     if run_id:
         if not (run_dir(project_root, run_id) / RUN_META_NAME).is_file():
             raise FileNotFoundError(f"run not found: {run_id}")
@@ -180,6 +231,7 @@ def save_known(project_root: Path, record: dict[str, Any]) -> Path:
         record = recompute_typed_node(
             record, project_root=project_root, run_dir_fn=run_dir
         )
+    # validate after recompute (confidence demotion already applied)
     blocks = validate_known_record(record, expected_id=kid)
     if blocks:
         raise ValueError("invalid known:\n  - " + "\n  - ".join(blocks))
@@ -199,26 +251,56 @@ def link_run_known(
     if not (run_dir(project_root, run_id) / RUN_META_NAME).is_file():
         raise FileNotFoundError(f"run not found: {run_id}")
     rec = load_known(project_root, known_id)
-    rids = list(rec.get("run_ids") or [])
-    if run_id not in rids:
-        rids.append(run_id)
-    rec["run_ids"] = rids
-    if primary or rec.get("primary_run_id") is None:
-        rec["primary_run_id"] = run_id
     try:
         meta = json.loads(
             (run_dir(project_root, run_id) / RUN_META_NAME).read_text(encoding="utf-8")
         )
+        if meta.get("voided"):
+            raise ValueError(
+                f"run {run_id} is voided — cannot link "
+                f"(terra run unvoid, or use another run)"
+            )
         pid = meta.get("probe_id")
         if isinstance(pid, str) and pid.strip():
             pids = list(rec.get("probe_ids") or [])
             if pid not in pids:
                 pids.append(pid)
             rec["probe_ids"] = pids
+    except ValueError:
+        raise
     except (json.JSONDecodeError, OSError):
         pass
+    rids = list(rec.get("run_ids") or [])
+    if run_id not in rids:
+        rids.append(run_id)
+    rec["run_ids"] = rids
+    if primary or rec.get("primary_run_id") is None:
+        rec["primary_run_id"] = run_id
     save_known(project_root, rec)
     return load_known(project_root, known_id)
+
+
+def unlink_run_known(
+    project_root: Path,
+    known_id: str,
+    run_id: str,
+) -> dict[str, Any]:
+    """Detach a sample; stats + confidence recompute (over-claimed conf demotes)."""
+    rec = load_known(project_root, known_id)
+    rids = [x for x in (rec.get("run_ids") or []) if x != run_id]
+    rec["run_ids"] = rids
+    if rec.get("primary_run_id") == run_id:
+        rec["primary_run_id"] = rids[-1] if rids else None
+    save_known(project_root, rec)
+    return load_known(project_root, known_id)
+
+
+def delete_known(project_root: Path, known_id: str) -> Path:
+    path = known_path(project_root, known_id)
+    if not path.is_file():
+        raise FileNotFoundError(f"known not found: {known_id}")
+    path.unlink()
+    return path
 
 
 def promote_known(
@@ -263,6 +345,148 @@ def set_known_status(
         rec["notes"] = notes
     save_known(project_root, rec)
     return load_known(project_root, known_id)
+
+
+# Freehand --value is the agent footgun that used to look like a silent no-op
+# when agents invented `terra known set` (subcommand missing) + 2>/dev/null.
+_FREEHAND_VALUE_MSG = (
+    "freehand --value is not supported (would skip probe evidence and stats).\n"
+    "  Sample-backed path:\n"
+    "    terra known set <id> --claim \"…\" --quantity <q> --from-run <run_id>\n"
+    "    # or: terra known create … && terra known link-run …\n"
+    "  Metadata only (existing known):\n"
+    "    terra known set <id> --claim \"…\" --notes \"…\"\n"
+    "  Provisional anchor without a run yet:\n"
+    "    terra known set <id> --claim \"…\" --quantity <q> --notes \"asserted=…\""
+)
+
+
+def set_known(
+    project_root: Path,
+    known_id: str,
+    *,
+    claim: str | None = None,
+    notes: str | None = None,
+    map_type: str | None = None,
+    quantity: str | None = None,
+    unit: str | None = None,
+    confidence: str | None = None,
+    status: str | None = None,
+    run_id: str | None = None,
+    expression: str | None = None,
+    vars: dict[str, Any] | list[str] | str | None = None,
+    value: Any = None,
+) -> tuple[dict[str, Any], str]:
+    """Create-or-update a known (agent-facing ``terra known set``).
+
+    Returns ``(record, action)`` where action is ``\"created\"`` or ``\"updated\"``.
+    Always writes on success. Freehand ``value`` without a run is rejected.
+    """
+    if value is not None:
+        raise ValueError(_FREEHAND_VALUE_MSG)
+
+    path = known_path(project_root, known_id)
+    exists = path.is_file()
+
+    if not exists:
+        if not claim or not str(claim).strip():
+            raise ValueError(
+                "known does not exist; --claim is required to create "
+                f"(id={known_id!r}). There is no silent set."
+            )
+        mtype = map_type or "number"
+        create_known(
+            project_root,
+            known_id,
+            claim=claim,
+            quantity=quantity,
+            map_type=mtype,
+            unit=unit or "",
+            confidence=confidence or "low",
+            status=status or "provisional",
+            run_id=run_id,
+            notes=notes or "",
+            force=False,
+            expression=expression,
+            vars=vars,
+        )
+        return load_known(project_root, known_id), "created"
+
+    rec = load_known(project_root, known_id)
+    changed = False
+
+    if claim is not None:
+        if not str(claim).strip():
+            raise ValueError("claim must be non-empty when provided")
+        rec["claim"] = claim.strip()
+        changed = True
+    if notes is not None:
+        rec["notes"] = notes
+        changed = True
+    if unit is not None:
+        rec["unit"] = unit.strip()
+        changed = True
+    if status is not None:
+        if status not in KNOWN_STATUSES:
+            raise ValueError(f"status must be one of {sorted(KNOWN_STATUSES)}")
+        rec["status"] = status
+        changed = True
+    if quantity is not None:
+        if rec.get("type") not in SCALAR_TYPES:
+            raise ValueError(
+                f"cannot set --quantity on type={rec.get('type')!r} "
+                f"(only {sorted(SCALAR_TYPES)})"
+            )
+        if not str(quantity).strip():
+            raise ValueError("quantity must be non-empty when provided")
+        rec["quantity"] = quantity.strip()
+        changed = True
+    if expression is not None:
+        if rec.get("type") != "formula":
+            raise ValueError("cannot set --expression on non-formula known")
+        rec["expression"] = expression.strip()
+        changed = True
+    if vars is not None:
+        if rec.get("type") != "formula":
+            raise ValueError("cannot set --var on non-formula known")
+        rec["vars"] = parse_vars_arg(vars)
+        changed = True
+    if map_type is not None and map_type != rec.get("type"):
+        raise ValueError(
+            f"cannot change type {rec.get('type')!r} → {map_type!r} "
+            "(delete + recreate, or create a new id)"
+        )
+
+    if confidence is not None:
+        if confidence not in CONFIDENCE_SET:
+            raise ValueError(f"confidence must be one of {sorted(CONFIDENCE_SET)}")
+        rec = recompute_typed_node(
+            rec, project_root=project_root, run_dir_fn=run_dir
+        )
+        ok, msg = can_claim_confidence(
+            rec.get("stats") or {}, confidence, map_type=rec.get("type")
+        )
+        if not ok:
+            raise ValueError(msg)
+        rec["confidence"] = confidence
+        changed = True
+
+    if run_id is not None:
+        save_known(project_root, rec) if changed else None
+        # link always writes
+        link_run_known(project_root, known_id, run_id)
+        return load_known(project_root, known_id), "updated"
+
+    if not changed:
+        raise ValueError(
+            "nothing to set — pass at least one of: "
+            "--claim --notes --quantity --unit --status --confidence "
+            "--from-run --expression --var\n"
+            "(freehand --value is rejected; see terra known set --help)"
+        )
+
+    save_known(project_root, rec)
+    return load_known(project_root, known_id), "updated"
 
 
 def list_knowns(project_root: Path) -> list[dict[str, Any]]:

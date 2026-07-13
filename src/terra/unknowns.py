@@ -8,8 +8,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .formula_type import (
+    empty_formula_stats,
+    parse_vars_arg,
+    validate_formula_fields,
+)
 from .number_type import (
     MAP_TYPES,
+    SCALAR_TYPES,
     empty_stats,
     recompute_typed_node,
 )
@@ -49,6 +55,8 @@ def create_unknown(
     map_type: str | None = None,
     quantity: str | None = None,
     unit: str = "",
+    expression: str | None = None,
+    vars: dict[str, Any] | list[str] | str | None = None,
 ) -> Path:
     if not _SLUG_RE.match(unknown_id):
         raise ValueError(
@@ -66,10 +74,19 @@ def create_unknown(
         raise ValueError(
             f"type must be one of {sorted(MAP_TYPES)} or omitted, got {map_type!r}"
         )
-    if map_type in ("number", "boolean") and (
+    if map_type in SCALAR_TYPES and (
         not quantity or not str(quantity).strip()
     ):
         raise ValueError(f"type={map_type} requires --quantity")
+    if map_type == "formula":
+        vars_spec = parse_vars_arg(vars)
+        expr = (expression or "").strip()
+        ferr = validate_formula_fields(expr, vars_spec)
+        if ferr:
+            raise ValueError("invalid formula:\n  - " + "\n  - ".join(ferr))
+    else:
+        vars_spec = {}
+        expr = ""
 
     now = _now()
     # create with --probe behaves like link-probe (probing, not open)
@@ -91,11 +108,17 @@ def create_unknown(
         "created_at": now,
         "updated_at": now,
     }
-    if map_type in ("number", "boolean"):
+    if map_type in SCALAR_TYPES:
         record["type"] = map_type
         record["quantity"] = quantity.strip()
         record["unit"] = (unit or "").strip()
         record["stats"] = empty_stats(map_type)
+        record["confidence_derived"] = "low"
+    elif map_type == "formula":
+        record["type"] = "formula"
+        record["expression"] = expr
+        record["vars"] = vars_spec
+        record["stats"] = empty_formula_stats()
         record["confidence_derived"] = "low"
     blocks = validate_unknown_record(record, expected_id=unknown_id)
     if blocks:
@@ -191,6 +214,17 @@ def link_run(
         raise FileNotFoundError(
             f"run not found: {run_id} (expected {meta_path})"
         )
+    try:
+        _meta_chk = json.loads(meta_path.read_text(encoding="utf-8"))
+        if _meta_chk.get("voided"):
+            raise ValueError(
+                f"run {run_id} is voided — cannot link "
+                f"(terra run unvoid, or use another run)"
+            )
+    except ValueError:
+        raise
+    except (json.JSONDecodeError, OSError):
+        pass
 
     rec = load_unknown(project_root, unknown_id)
     rids = list(rec.get("run_ids") or [])
@@ -225,13 +259,23 @@ def link_run(
 def unlink_run(
     project_root: Path, unknown_id: str, run_id: str
 ) -> dict[str, Any]:
+    """Detach a run; typed stats recompute on save (bad sample drops out)."""
     rec = load_unknown(project_root, unknown_id)
     rids = [x for x in (rec.get("run_ids") or []) if x != run_id]
     rec["run_ids"] = rids
     if rec.get("primary_run_id") == run_id:
         rec["primary_run_id"] = rids[-1] if rids else None
     save_unknown(project_root, rec)
-    return rec
+    return load_unknown(project_root, unknown_id)
+
+
+def delete_unknown(project_root: Path, unknown_id: str) -> Path:
+    """Remove unknown record from the active map (irreversible)."""
+    path = unknown_path(project_root, unknown_id)
+    if not path.is_file():
+        raise FileNotFoundError(f"unknown not found: {unknown_id}")
+    path.unlink()
+    return path
 
 
 def describe_unknown(project_root: Path, unknown_id: str) -> dict[str, Any]:

@@ -11,7 +11,11 @@ import statistics
 from pathlib import Path
 from typing import Any
 
-MAP_TYPES = frozenset({"number", "boolean"})
+# Leaf filter types for knowns/unknowns and for plan *legs*.
+# Plans are a higher layer (see evidence_plan / plans), not a peer type.
+# number/boolean: estimates; formula: observation as checkable predicate + vars
+SCALAR_TYPES = frozenset({"number", "boolean"})
+MAP_TYPES = frozenset({"number", "boolean", "formula"})
 CONFIDENCE_LEVELS = ("low", "med", "high")
 CONFIDENCE_SET = frozenset(CONFIDENCE_LEVELS)
 
@@ -150,6 +154,10 @@ def derive_confidence(stats: dict[str, Any], map_type: str | None = None) -> str
     kind = map_type or stats.get("kind") or "number"
     if kind == "boolean":
         return derive_confidence_boolean(stats)
+    if kind == "formula":
+        from .formula_type import derive_confidence_formula
+
+        return derive_confidence_formula(stats)
     return derive_confidence_number(stats)
 
 
@@ -170,6 +178,10 @@ def can_claim_confidence(
     if confidence_rank(want) <= confidence_rank(derived):
         return True, derived
     kind = map_type or stats.get("kind") or "number"
+    if kind == "formula":
+        from .formula_type import can_claim_formula_confidence
+
+        return can_claim_formula_confidence(stats, want)
     if kind == "boolean":
         return (
             False,
@@ -318,6 +330,10 @@ def extract_measures_from_run_meta(
 def empty_stats(map_type: str = "number") -> dict[str, Any]:
     if map_type == "boolean":
         return compute_boolean_stats([])
+    if map_type == "formula":
+        from .formula_type import empty_formula_stats
+
+        return empty_formula_stats()
     return compute_number_stats([])
 
 
@@ -331,6 +347,13 @@ def recompute_typed_node(
     from .probe_run import RUN_META_NAME
 
     map_type = record.get("type") or "number"
+    if map_type == "formula":
+        from .formula_type import recompute_formula_node
+
+        return recompute_formula_node(
+            record, project_root=project_root, run_dir_fn=run_dir_fn
+        )
+
     quantity = record.get("quantity")
     if not isinstance(quantity, str) or not quantity.strip():
         quantity = None
@@ -351,6 +374,17 @@ def recompute_typed_node(
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             sample_runs.append({"run_id": rid, "n": 0, "missing": True})
+            continue
+        # Voided runs stay on disk for audit but never feed stats.
+        if meta.get("voided"):
+            sample_runs.append(
+                {
+                    "run_id": rid,
+                    "n": 0,
+                    "voided": True,
+                    "void_reason": meta.get("void_reason"),
+                }
+            )
             continue
         vals = extract_measures_from_run_dir(
             rdir, meta, quantity=quantity, map_type=map_type

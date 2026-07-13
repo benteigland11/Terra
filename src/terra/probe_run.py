@@ -13,7 +13,13 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import __version__
-from .paths import ensure_runs_store, probe_dir, run_dir, runs_root
+from .paths import (
+    ensure_runs_store,
+    get_active_map_id,
+    probe_dir,
+    run_dir,
+    runs_root,
+)
 from .probe_contract import (
     PROBE_ENTRY_DEFAULT,
     PROBE_META_NAME,
@@ -289,6 +295,7 @@ def run_probe(
         "probe_kind": meta.get("kind"),
         "watch_mode": ctx.get("watch_mode"),
         "duration_s": ctx.get("duration_s"),
+        "map_id": get_active_map_id(project_root),
     }
 
     warnings: list[str] = []
@@ -425,3 +432,177 @@ def load_run(project_root: Path, run_id: str) -> dict[str, Any]:
     if not path.is_file():
         raise FileNotFoundError(f"run not found: {run_id}")
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace(
+        "+00:00", "Z"
+    )
+
+
+def find_run_links(project_root: Path, run_id: str) -> dict[str, list[str]]:
+    """Which knowns/unknowns/plans on the active map still reference this run."""
+    from .paths import knowns_root, unknowns_root
+    from .plans import find_plans_linking_run
+
+    knowns: list[str] = []
+    unknowns: list[str] = []
+    kroot = knowns_root(project_root)
+    if kroot.is_dir():
+        for path in kroot.glob("*.json"):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+            if run_id in (data.get("run_ids") or []):
+                knowns.append(path.stem)
+    uroot = unknowns_root(project_root)
+    if uroot.is_dir():
+        for path in uroot.glob("*.json"):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+            if run_id in (data.get("run_ids") or []):
+                unknowns.append(path.stem)
+    plans = find_plans_linking_run(project_root, run_id)
+    return {"knowns": knowns, "unknowns": unknowns, "plans": plans}
+
+
+def void_run(
+    project_root: Path,
+    run_id: str,
+    *,
+    reason: str = "",
+    cascade: bool = True,
+) -> dict[str, Any]:
+    """Mark a run voided so it never feeds stats. Prefer over delete for audit.
+
+    With cascade=True (default), unlink from all knowns/unknowns on the active
+    map and recompute their stats so the next agent does not see poisoned n/mean.
+    """
+    path = run_dir(project_root, run_id) / RUN_META_NAME
+    if not path.is_file():
+        raise FileNotFoundError(f"run not found: {run_id}")
+    meta = json.loads(path.read_text(encoding="utf-8"))
+    meta["voided"] = True
+    meta["voided_at"] = _now_iso()
+    meta["void_reason"] = (reason or "").strip() or "voided"
+    path.write_text(
+        json.dumps(meta, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+    unlinked: dict[str, list[str]] = {
+        "knowns": [],
+        "unknowns": [],
+        "plans": [],
+    }
+    links = find_run_links(project_root, run_id)
+    if cascade:
+        from .knowns import unlink_run_known
+        from .plans import unlink_run_plan
+        from .unknowns import unlink_run
+
+        for kid in links["knowns"]:
+            unlink_run_known(project_root, kid, run_id)
+            unlinked["knowns"].append(kid)
+        for uid in links["unknowns"]:
+            unlink_run(project_root, uid, run_id)
+            unlinked["unknowns"].append(uid)
+        for pid in links.get("plans") or []:
+            unlink_run_plan(project_root, pid, run_id)
+            unlinked["plans"].append(pid)
+    else:
+        # Still recompute so voided flag drops samples even if still listed.
+        from .knowns import load_known, save_known
+        from .plans import load_plan, save_plan
+        from .unknowns import load_unknown, save_unknown
+
+        for kid in links["knowns"]:
+            save_known(project_root, load_known(project_root, kid))
+            unlinked["knowns"].append(kid)
+        for uid in links["unknowns"]:
+            save_unknown(project_root, load_unknown(project_root, uid))
+            unlinked["unknowns"].append(uid)
+        for pid in links.get("plans") or []:
+            save_plan(project_root, load_plan(project_root, pid))
+            unlinked["plans"].append(pid)
+
+    return {
+        "run": load_run(project_root, run_id),
+        "unlinked": unlinked,
+        "cascade": cascade,
+        "links_before": links,
+    }
+
+
+def unvoid_run(project_root: Path, run_id: str) -> dict[str, Any]:
+    """Clear voided flag. Does not re-link — agent must link-run again."""
+    path = run_dir(project_root, run_id) / RUN_META_NAME
+    if not path.is_file():
+        raise FileNotFoundError(f"run not found: {run_id}")
+    meta = json.loads(path.read_text(encoding="utf-8"))
+    meta["voided"] = False
+    meta.pop("voided_at", None)
+    meta.pop("void_reason", None)
+    path.write_text(
+        json.dumps(meta, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    return load_run(project_root, run_id)
+
+
+def delete_run(
+    project_root: Path,
+    run_id: str,
+    *,
+    cascade: bool = True,
+) -> dict[str, Any]:
+    """Hard-delete a run directory. Prefer void_run unless you must purge disk."""
+    import shutil
+
+    rdir = run_dir(project_root, run_id)
+    if not rdir.is_dir():
+        raise FileNotFoundError(f"run not found: {run_id}")
+    links = find_run_links(project_root, run_id)
+    unlinked: dict[str, list[str]] = {
+        "knowns": [],
+        "unknowns": [],
+        "plans": [],
+    }
+    if cascade:
+        from .knowns import unlink_run_known
+        from .plans import unlink_run_plan
+        from .unknowns import unlink_run
+
+        for kid in links["knowns"]:
+            unlink_run_known(project_root, kid, run_id)
+            unlinked["knowns"].append(kid)
+        for uid in links["unknowns"]:
+            unlink_run(project_root, uid, run_id)
+            unlinked["unknowns"].append(uid)
+        for pid in links.get("plans") or []:
+            unlink_run_plan(project_root, pid, run_id)
+            unlinked["plans"].append(pid)
+    else:
+        from .knowns import load_known, save_known
+        from .plans import load_plan, save_plan
+        from .unknowns import load_unknown, save_unknown
+
+        for kid in links["knowns"]:
+            save_known(project_root, load_known(project_root, kid))
+            unlinked["knowns"].append(kid)
+        for uid in links["unknowns"]:
+            save_unknown(project_root, load_unknown(project_root, uid))
+            unlinked["unknowns"].append(uid)
+        for pid in links.get("plans") or []:
+            save_plan(project_root, load_plan(project_root, pid))
+            unlinked["plans"].append(pid)
+
+    shutil.rmtree(rdir)
+    return {
+        "deleted": run_id,
+        "path": str(rdir),
+        "unlinked": unlinked,
+        "cascade": cascade,
+        "links_before": links,
+    }

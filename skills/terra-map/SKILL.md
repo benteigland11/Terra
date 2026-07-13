@@ -1,227 +1,64 @@
 ---
 name: terra-map
 description: >
-  REQUIRED for Terra map middleware and opaque domains: modded Minecraft, game
-  engines, hardware, weird runtimes, "how does this world work", thrashing APIs,
-  freehand from training data, or any work that needs survey before code.
-  Covers unknowns, knowns (typed: number = n/mean/std, boolean = rate),
-  probes, stamped runs, suites, link-run, promote ladder (n=1 cannot be high).
-  Prefer this loop over silent guessing. Does NOT replace Cartograph widgets
-  (bricks) — Terra is the map (understand). Fire on Terra CLI, fog, probes,
-  knowns/unknowns, Minecraft/mod dev, or "looks good" after one sample.
+  Router for Terra program+map work when the specific surface is unclear, or
+  when the user says "terra-map" / "use terra". Prefer the focused skill when
+  known: terra-start (init), terra-brief (needs/enablers/propose), terra-route
+  (DAG/lead loop/complete), terra-survey (unknown/known/plan/void), terra-scopes
+  (global vs session), terra-probe (probe.py). Fire on general Terra campaign
+  questions, "how do I use terra here", or mixed brief+route+map in one turn —
+  then open the matching child skill(s). Does NOT replace those skills; does
+  NOT implement probe.py (terra-probe); does NOT develop Terra CLI (terra-dev).
 ---
 
-# terra-map — map middleware above Cartograph
+# terra-map — index (not the whole manual)
 
-| Soft (forgets) | Hard (compounds) |
-| -------------- | ---------------- |
-| "Looks good" after one sample | **known** with sample ladder (n=1 → low only) |
-| Chat dump of a command | Stamped **run** + **link-run** |
-| Freehand domain from pretraining | **unknown** → **probe** → **run** → evidence |
+Terra program layer sits **above** Cartograph bricks.  
+Procedure is split so each skill is one job. **Open the child skill** and follow it.
 
-**Laws**
+| Skill | One job |
+| ----- | ------- |
+| **terra-start** | `terra init` + brief + route skeleton + budget |
+| **terra-brief** | needs, deliverables, enablers, **budget_points**, propose/accept |
+| **terra-route** | lead loop, buckets 3/8/21, **lock-plan / set-effort / budget** |
+| **terra-survey** | unknown → probe run → known/plan → void; types |
+| **terra-scopes** | global vs session maps |
+| **terra-probe** | implement/validate/run instruments |
 
-1. Under fog: do **not** freehand the domain.  
-2. **Probes are open** (infinite instruments). **Knowns/unknowns are typed** (finite).  
-3. Types: **`number`** (mean±std), **`boolean`** (rate from true/false trials).  
-4. Validate alone ≠ surveyed. **Run + link** is the reading.  
-5. Resolve unknown ≠ encode high known. n=1 cannot `promote high`.
+## Soft vs hard (always)
 
-CLI: `pip install -e ~/Cartograph/Terra` → `terra`.  
-Store (in the project under survey): `.terra/map/`.
+| Soft | Hard |
+| ---- | ---- |
+| “Looks good” after one sample | known at earned confidence (**terra-survey**) |
+| Chat dump of work | **terra-route** complete + run_id/known_id |
+| Freehand domain | **terra-survey** + **terra-probe** |
+| Off-graph side quests | **terra-route** add |
+| Silent scope creep | **terra-brief** propose/accept |
+| Route green, map empty | incomplete — **terra-survey** |
+| Infinite thrash | **budget_points** + buckets; check `route budget` |
 
-Docs: `docs/number-type.md`, `docs/boolean-type.md`, `docs/watch-duration.md`,
-`docs/to-schema.md`, `docs/status-vocab.md`, `docs/unknowns.md`, `docs/suites.md`.
+## Typical lead sequence
 
----
+1. No `.terra/`? → **terra-start** (set `budget_points`, bucket tasks, prefer `lock-plan`)  
+2. Each cycle → **terra-route** (`route next`, `route budget`, complete with evidence)  
+3. Work got harder → **terra-route** `set-effort` (actual only if plan locked)  
+4. Claim-shaped task → **terra-survey** (+ **terra-probe** if no instrument)  
+5. Wrong map / experiment isolation → **terra-scopes**  
+6. Scope / raise budget / enablers → **terra-brief**  
+7. Reusable code → **cg-plan** / Cartograph  
 
-## The full loop (do these — do not only suggest)
+## Handoffs
 
-### Fog / stuck / opaque API
-
-1. **STOP** freehand domain logic after one failed guess or clear uncertainty.
-
-2. **Open an unknown** (non-negotiable if still stuck):
-
-```bash
-# Prefer typed when the answer is a measurable quantity:
-terra unknown create <slug> \
-  --type number --quantity hostile_count \
-  --claim "How many hostiles in region R at night?" \
-  --evidence "repeated probe measures of hostile_count"
-
-# Untyped ticket still OK for mechanism fog:
-terra unknown create <slug> \
-  --claim "What we do not know" \
-  --evidence "What reading would resolve this"
+```text
+terra-route  --need instrument-->  terra-probe  --run_id-->  terra-survey
+terra-route  --scope change----->  terra-brief
+terra-survey --wrong map-------->  terra-scopes
 ```
 
-Default `blocks_build=true`. Stuck with no open unknown = process failure.
+## Not here
 
-3. **Create a probe**:
+- Full CLI catalogs and step-by-step playbooks → **child skills**  
+- Kickoff markdown templates → project files / human  
+- Cartograph widget create → **cg-plan** / **cg-create**  
 
-```bash
-terra probe create <slug> --purpose "…" --kind watch   # duration 0 = snapshot
-# --kind run to drive/simulate; --duration N for watch window
-```
-
-4. **Link instrument** → status `probing`:
-
-```bash
-terra unknown link-probe <unknown_id> <probe_id>
-# or: unknown create … --probe <probe_id>
-```
-
-5. **Implement `probe.py`** for *this* install:
-
-```python
-return {
-    "to": to,                    # non-empty target
-    "status": "ok",              # prefer: ok|degraded|unavailable|empty|error
-    "artifacts": [{"path": str(p), "role": "out"}],
-    "measures": [                # REQUIRED for typed map nodes
-        {"quantity": "hostile_count", "value": 3},      # number
-        # {"quantity": "rcon_up", "value": True},       # boolean
-    ],
-}
-```
-
-Honor `dry_run` / `_terra_validation=level1` (no live wait).  
-Watch window: if `ctx["watch_mode"]=="window"`, poll until `ctx["deadline_unix"]`.  
-Helpers: `.terra/map/lib/` on sys.path during validate/run.
-
-6. **Validate instrument** (design bar only):
-
-```bash
-terra probe validate <probe_id>   # INPUT / EXECUTE / OUTPUT must pass
-```
-
-7. **Run and stamp** (evidence):
-
-```bash
-terra probe run <probe_id> --to '{"kind":"region","id":"R"}'
-# multi-probe: terra suite create … --probes a,b,c && terra suite run … --to '…'
-```
-
-8. **Link the run** (structured evidence):
-
-```bash
-terra unknown link-run <unknown_id> <run_id>
-terra unknown show <unknown_id>   # n/mean/std if type=number
-```
-
-9. **Close unknown** when the research ticket is done:
-
-```bash
-terra unknown status <id> resolved    # if run_ids linked
-# or --resolved-by "…"
-```
-
-10. **Encode a known** when you will **build product on the claim** (typed belief):
-
-```bash
-terra known create <slug> \
-  --claim "Night hostile count in R is about the sample mean" \
-  --quantity hostile_count \
-  --from-run <run_id>
-terra known link-run <slug> <run_id2>    # second sample before med/high
-terra known promote <slug> med           # BLOCKS if ladder fails
-terra known show <slug>                  # n, mean, std
-```
-
-**Never** set confidence high on n=1. **Never** treat provisional low known as law for big features.
-
----
-
-## Typed knowns/unknowns (number + boolean)
-
-| | **number** | **boolean** |
-| - | ---------- | ----------- |
-| measures value | float | true/false (or 0/1) |
-| stats | n, mean, std | n, k_true, k_false, **rate** |
-| med | n≥3 or (n≥2 + std) | n≥3 |
-| high | n≥5 + tight std/mean | n≥5 + unanimous rate 0 or 1 |
-
-`terra known promote <id> high` **blocks** until the ladder allows it.
-
----
-
-## Recommended envelopes (composition, not domain funnels)
-
-**`to`** (warn if `kind` missing on live run; `--strict-to` fails CI):
-
-```json
-{ "kind": "region|entity|path|server|literal|default", "id": "…", "limit": 50 }
-```
-
-**`status`** (warn if freeform; `--strict-status` fails CI):  
-`ok` | `degraded` | `unavailable` | `empty` | `error`
-
----
-
-## Minecraft / mod dogfood
-
-| Situation | Action |
-| --------- | ------ |
-| Count / rate / size question | `--type number --quantity …` + measures on probe |
-| "How many hostiles in R" | unknown number → probe → run → link-run → known only after samples |
-| One green run | known **low** / provisional only — **second sample** before med |
-| "API like Forge X" | probe + run this loader — no pretraining |
-| 3+ probes same `to` | `terra suite create/run` |
-
----
-
-## CLI cheat sheet
-
-```bash
-terra unknown create <id> --claim "…" --evidence "…" [--type number --quantity q]
-terra unknown link-probe <u> <probe>
-terra unknown link-run <u> <run_id>
-terra unknown show <u>
-terra unknown status <u> resolved
-
-terra known create <id> --claim "…" --quantity q [--from-run <run>]
-terra known link-run <id> <run_id>
-terra known promote <id> low|med|high
-terra known show <id>
-terra known validate
-
-terra probe create <id> --purpose "…" --kind watch|run
-terra probe validate <id>
-terra probe run <id> --to '{…}' [--strict-to] [--strict-status]
-
-terra suite create <id> --probes a,b,c
-terra suite validate <id>
-terra suite run <id> --to '{…}'
-
-terra run list [--status unavailable] [--probe p]
-```
-
-Product path: **probes + unknowns + knowns + runs + lib + suites**.  
-Ignore legacy `.terra/map/data/`.
-
----
-
-## What not to do
-
-- Do **not** invent domain behavior from memory when a probe can ask the world  
-- Do **not** thrash without an **unknown**  
-- Do **not** stop after **validate** — **run + link** is the reading  
-- Do **not** resolve with empty trail  
-- Do **not** `promote high` (or treat as law) on **n=1**  
-- Do **not** put domain funnels in Terra core  
-- Do **not** confuse Terra (map) with Cartograph (bricks)  
-
----
-
-## Completion criterion
-
-For each durable foggy gap:
-
-1. **unknown** exists (typed `number` when the answer is a quantity),  
-2. **probe** validates,  
-3. ≥1 **stamped run** with **measures** if number-typed, **link-run**’d,  
-4. if building on the claim → **known** at **earned** confidence (second sample before med),  
-5. unknown **resolved** with trail when research ticket is done.
-
-Stopping at validate or one green run = incomplete.
+If you only remember one rule: **open the skill for the surface you are touching; do not freehand Terra from memory.**

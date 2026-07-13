@@ -18,6 +18,29 @@ terra --version
 
 Global agent skill (Grok): `terra-map` under `~/.grok/skills/terra-map/`.
 
+## Map scopes (global vs experiment)
+
+One bag of knowns for the whole project gets **muddy**. Terra splits:
+
+| Map | Path | Holds |
+| --- | ---- | ----- |
+| **global** | `.terra/map/` | Durable beliefs + default evidence; **all probes + lib** |
+| **session** | `.terra/map/sessions/<id>/` | Experiment unknowns / knowns / runs / suites |
+
+```bash
+terra map create night_census --purpose "Night mob rates" --use
+terra map list
+terra map use global          # back to durable map
+terra map status              # JSON default (agent-first)
+terra map status --human      # pretty text
+terra map status --html --open
+terra --map night_census known list   # one-shot scope
+```
+
+Agent envelope follows Cartograph (`universal-agent-response`):  
+`{status, data, meta?}` with `data.attention` + `data.next_actions`.  
+See [docs/agent-io.md](docs/agent-io.md), [docs/maps.md](docs/maps.md).
+
 ## Probes + unknowns (now)
 
 ```bash
@@ -42,9 +65,13 @@ terra unknown validate
 Layout:
 
 ```text
-.terra/map/
-  probes/<id>/probe.json + probe.py
-  unknowns/<id>.json
+.terra/
+  active_map              # global | session id
+  map/
+    probes/<id>/          # SHARED instruments
+    lib/                  # SHARED helpers
+    unknowns/ knowns/ runs/ suites/   # global beliefs
+    sessions/<exp>/       # experiment-scoped beliefs + evidence
 ```
 
 **Level-1 probe validation:** input `to` → output `to`/`status`/`artifacts` (loud I/O steps).  
@@ -90,6 +117,27 @@ Unknowns can also be `--type number --quantity q` (same stats on link-run).
 terra suite create night_census --probes town_layout,agent_lens,anomalies
 terra suite run night_census --to '{"kind":"town"}'
 ```
+
+**Plans** (above types — multi-evidence + sequential):
+
+```bash
+terra plan create gate --mode sequence --claim "…" \
+  --leg reach:boolean:rcon_up --leg smoke:boolean:smoke_ok:n=3
+terra plan link-run gate <run> --leg reach
+# sequence blocks linking smoke until reach is satisfied
+```
+
+See [docs/evidence-plan.md](docs/evidence-plan.md).
+
+**Adjust (retract bad evidence)** — map is not append-only:
+
+```bash
+terra run void <run_id> --reason "probe bug"   # preferred
+terra known unlink-run est <run_id>
+terra known delete est
+```
+
+See [docs/adjust.md](docs/adjust.md).
 
 **Product path:** `probes/` + `unknowns/` + `runs/` + `lib/` + `suites/`.  
 **Legacy:** `.terra/map/data/` (old capture sketch) — ignore for agents.
