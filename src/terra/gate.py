@@ -71,7 +71,7 @@ def _collect_map_violations(
                 }
             )
         corr = ((rec.get("stats") or {}).get("corroboration")) or {}
-        if corr.get("agree") is False:
+        if corr.get("agree") is False and corr.get("accepted") is not True:
             violations.append(
                 {
                     "kind": "methods_disagree",

@@ -1169,7 +1169,13 @@ def cmd_known_show(args: argparse.Namespace) -> int:
             line += f"  tolerance={corr.get('tolerance')}"
         print(line)
         if corr.get("agree") is False:
-            print("METHODS DISAGREE — one instrument is wrong; void bad evidence or fix the probe")
+            if corr.get("accepted") is True:
+                print(
+                    f"spread ACCEPTED as uncertainty: {corr.get('accepted_reason')}"
+                    f"  band={corr.get('band')}"
+                )
+            else:
+                print("METHODS DISAGREE — one instrument is wrong; void bad evidence or fix the probe")
     print(f"run_ids: {rec.get('run_ids') or []}")
     deps = rec.get("deps") or {}
     if deps.get("knowns") or deps.get("files"):
@@ -1245,6 +1251,25 @@ def cmd_known_reaffirm(args: argparse.Namespace) -> int:
     print(
         f"reaffirmed known {rec['id']} "
         f"(deps re-stamped; trail in record.reaffirmed)"
+    )
+    return 0
+
+
+def cmd_known_accept_spread(args: argparse.Namespace) -> int:
+    from .knowns import accept_spread
+
+    try:
+        root = require_project_root()
+        rec = accept_spread(root, args.id, reason=args.reason)
+    except (ValueError, FileNotFoundError, OSError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    corr = (rec.get("stats") or {}).get("corroboration") or {}
+    print(
+        f"known {rec['id']}: spread accepted as uncertainty  "
+        f"spread={corr.get('spread')}  band={corr.get('band')}\n"
+        f"  confidence caps at med; new runs that widen the spread re-trip "
+        f"the alarm; agreement clears it"
     )
     return 0
 
@@ -2899,6 +2924,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_ktr.add_argument("id")
     p_ktr.add_argument("--human", action="store_true", help="Text output")
     p_ktr.set_defaults(func=cmd_known_tree)
+
+    p_kas = kn_sub.add_parser(
+        "accept-spread",
+        help="Accept an irreducible cross-method spread as honest "
+        "uncertainty (recorded; caps at med; band carried to consumers)",
+    )
+    p_kas.add_argument("id")
+    p_kas.add_argument("--reason", required=True)
+    p_kas.set_defaults(func=cmd_known_accept_spread)
 
     p_kt = kn_sub.add_parser(
         "tolerance",

@@ -597,6 +597,42 @@ def set_tolerance(
     return load_known(project_root, known_id)
 
 
+def accept_spread(
+    project_root: Path, known_id: str, *, reason: str
+) -> dict[str, Any]:
+    """Accept an irreducible cross-method spread as honest uncertainty.
+
+    Recorded decision (like reaffirm): reads unblock and carry the band,
+    confidence caps at med, gate violation clears. Auto-revoked when the
+    spread grows beyond the accepted stamp; obsolete when methods agree.
+    """
+    if not reason or not str(reason).strip():
+        raise ValueError("accept-spread requires --reason (no silent acceptance)")
+    rec = load_known(project_root, known_id)
+    rec = recompute_typed_node(rec, project_root=project_root, run_dir_fn=run_dir)
+    corr = (rec.get("stats") or {}).get("corroboration") or {}
+    if corr.get("agree") is None:
+        raise ValueError(
+            f"known {known_id}: nothing to accept — agreement is not "
+            "judgeable (need 2+ methods and a declared tolerance: "
+            f"terra known tolerance {known_id} --within 5%)"
+        )
+    if corr.get("agree") is True:
+        raise ValueError(
+            f"known {known_id}: methods already agree within tolerance — "
+            "nothing to accept"
+        )
+    rec["accepted_spread"] = {
+        "at": _now(),
+        "reason": reason.strip(),
+        "spread": corr.get("spread"),
+        "tolerance": corr.get("tolerance"),
+        "band": corr.get("band"),
+    }
+    save_known(project_root, rec)
+    return load_known(project_root, known_id)
+
+
 def reaffirm_known(
     project_root: Path, known_id: str, *, reason: str
 ) -> dict[str, Any]:

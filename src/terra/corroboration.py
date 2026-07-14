@@ -110,6 +110,12 @@ def corroboration_gate_high(stats: dict[str, Any]) -> tuple[bool, str]:
     methods = int(corr.get("methods") or 0)
     agree = corr.get("agree")
     if agree is False:
+        if corr.get("accepted") is True:
+            return (
+                False,
+                "spread accepted as uncertainty — high needs actual "
+                "agreement within tolerance, not an accepted band",
+            )
         return False, "methods disagree — resolve before any promotion"
     if methods < 2:
         return (
@@ -127,4 +133,62 @@ def corroboration_gate_high(stats: dict[str, Any]) -> tuple[bool, str]:
 
 
 def methods_disagree(stats: dict[str, Any]) -> bool:
-    return (stats.get("corroboration") or {}).get("agree") is False
+    """Unaccepted disagreement — the alarm state that blocks everything."""
+    corr = stats.get("corroboration") or {}
+    return corr.get("agree") is False and corr.get("accepted") is not True
+
+
+def spread_accepted(stats: dict[str, Any]) -> bool:
+    corr = stats.get("corroboration") or {}
+    return corr.get("agree") is False and corr.get("accepted") is True
+
+
+def reconcile_accepted_spread(
+    record: dict[str, Any], corr: dict[str, Any]
+) -> dict[str, Any]:
+    """Apply a recorded accept-spread decision to a fresh corroboration verdict.
+
+    Mutates ``corr`` (accepted / accepted_reason) and returns the record —
+    with ``accepted_spread`` dropped when agreement was actually reached
+    (acceptance is obsolete once methods agree).
+    """
+    acc = record.get("accepted_spread")
+    if not acc:
+        return record
+    agree = corr.get("agree")
+    if agree is True:
+        # methods now agree within tolerance — acceptance no longer needed
+        record = dict(record)
+        record.pop("accepted_spread", None)
+        return record
+    if agree is False:
+        spread = corr.get("spread")
+        accepted_at_spread = acc.get("spread")
+        if (
+            spread is not None
+            and accepted_at_spread is not None
+            and float(spread) > float(accepted_at_spread) + 1e-12
+        ):
+            corr["accepted"] = False
+            corr["accepted_reason"] = (
+                f"spread grew to {spread} beyond accepted "
+                f"{accepted_at_spread} — re-review "
+                f"(terra known accept-spread … --reason)"
+            )
+        else:
+            corr["accepted"] = True
+            corr["accepted_reason"] = acc.get("reason")
+            corr["accepted_at"] = acc.get("at")
+    return record
+
+
+def method_band(by_probe: dict[str, dict[str, Any]]) -> list[float] | None:
+    """[min, max] of per-method means (numbers only; None if <2 methods)."""
+    means = [
+        g.get("mean")
+        for g in (by_probe or {}).values()
+        if (g.get("n") or 0) > 0 and g.get("mean") is not None
+    ]
+    if len(means) < 2:
+        return None
+    return [float(min(means)), float(max(means))]

@@ -462,9 +462,16 @@ def recompute_typed_node(
         g.pop("by_run", None)
         g.pop("values", None)
     stats["by_probe"] = by_probe
-    stats["corroboration"] = compute_corroboration(
+    corr = compute_corroboration(
         by_probe, map_type=map_type, tolerance=record.get("tolerance")
     )
+    from .corroboration import method_band, reconcile_accepted_spread
+
+    band = method_band(by_probe)
+    if band is not None:
+        corr["band"] = band
+    record = reconcile_accepted_spread(record, corr)
+    stats["corroboration"] = corr
     record = dict(record)
     record["stats"] = stats
     record["confidence_derived"] = derive_confidence(stats, map_type=map_type)

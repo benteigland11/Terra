@@ -177,6 +177,11 @@ def collect_map_status(
                         "corroboration"
                     ) or {}).get("agree")
                 ),
+                "spread_accepted": (
+                    (((k.get("record") or {}).get("stats") or {}).get(
+                        "corroboration"
+                    ) or {}).get("accepted") is True
+                ),
                 "stale": bool(
                     (stale_map.get(
                         str((k.get("record") or {}).get("id") or k.get("id"))
@@ -373,6 +378,21 @@ def _derive_agent_guidance(
         for k in scope.get("knowns") or []:
             if k.get("methods_agree") is False:
                 kid = str(k.get("id") or "")
+                if k.get("spread_accepted"):
+                    attention.append(
+                        attention_item(
+                            "spread_accepted",
+                            id=kid,
+                            severity="info",
+                            why=(
+                                f"known {kid} on map {mid}: cross-method "
+                                f"spread accepted as uncertainty (capped at "
+                                f"med; consumers carry the band)"
+                            ),
+                            extra={"map_id": mid},
+                        )
+                    )
+                    continue
                 attention.append(
                     attention_item(
                         "methods_disagree",

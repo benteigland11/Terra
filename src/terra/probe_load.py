@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import sys
 from contextlib import contextmanager
 from pathlib import Path
@@ -41,17 +40,23 @@ def load_probe_module(
     *,
     module_name: str,
 ) -> tuple[ModuleType | None, str | None]:
-    """Import probe script with map lib available."""
+    """Import probe script with map lib available.
+
+    Compiles straight from source, bypassing the pyc cache: bytecode
+    validation is mtime+size, so a probe.py edited twice within one second
+    (same length) would silently run STALE code — instruments must always
+    execute what is on disk.
+    """
     script_path = script_path.resolve()
     try:
         with probe_sys_path(project_root, script_path.parent):
-            spec = importlib.util.spec_from_file_location(module_name, script_path)
-            if spec is None or spec.loader is None:
-                return None, "importlib could not load probe script"
-            mod = importlib.util.module_from_spec(spec)
+            source = script_path.read_text(encoding="utf-8")
+            code = compile(source, str(script_path), "exec")
+            mod = ModuleType(module_name)
+            mod.__file__ = str(script_path)
             sys.modules[module_name] = mod
             try:
-                spec.loader.exec_module(mod)
+                exec(code, mod.__dict__)  # noqa: S102 — probe scripts are the product
             finally:
                 sys.modules.pop(module_name, None)
             return mod, None

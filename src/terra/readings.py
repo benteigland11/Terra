@@ -171,7 +171,11 @@ def read_known(
         )
 
     corr = stats.get("corroboration") or {}
-    if corr.get("agree") is False and not allow_disagree:
+    if (
+        corr.get("agree") is False
+        and corr.get("accepted") is not True
+        and not allow_disagree
+    ):
         raise ValueError(
             f"known {known_id}: methods DISAGREE "
             f"(spread={corr.get('spread')!r}, tolerance="
@@ -207,6 +211,8 @@ def read_known(
         "stale": bool(stale_info.get("stale")),
         "stale_reasons": list(stale_info.get("reasons") or []),
         "corroboration": corr,
+        "uncertainty": corr.get("spread"),
+        "band": corr.get("band"),
         "consumer": who,
     }
 

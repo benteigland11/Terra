@@ -46,6 +46,27 @@ terra known promote cg high              # needs 2+ agreeing methods
 
 `known graph` marks multi-method nodes: `2 methods ✓` / `2 methods ✗ DISAGREE`.
 
+## Accepting an irreducible spread
+
+Sometimes both methods are defensible and the discrepancy is irreducible
+with current instruments (early-phase CG models). The honest belief is a
+**band**, not a blocked number:
+
+```bash
+terra known accept-spread cg --reason "mass_props vs weight_balance irreducible at phase 0"
+```
+
+Recorded decision (like reaffirm): reads unblock and carry `uncertainty` +
+`band: [min_method_mean, max_method_mean]`; confidence caps at **med**
+(reproducible-but-contested — never high); the gate violation clears;
+attention drops to info. Self-adjusting: a new run that **widens** the
+spread beyond the accepted stamp re-trips the full alarm; methods reaching
+actual agreement clears the acceptance and reopens the road to high.
+
+Related-but-distinct quantities (wing-bay capacity vs total fuel) are NOT a
+disagreement — they are different quantities the substrate refuses to pool,
+and med is their honest ceiling until a genuine second method exists.
+
 ## Resolving a disagreement
 
 The 8%-MAC playbook: `known show` compares per-probe means; find the lying

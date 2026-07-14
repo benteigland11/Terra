@@ -37,7 +37,12 @@ Instruments: **terra-probe**. Program tasks: **terra-route**.
 11. Two evidence axes: repetition (same probe, more runs) proves precision;
    **corroboration** (different probes agreeing `--within` tolerance) proves
    truth. `high` needs ≥2 agreeing methods; methods in disagreement collapse
-   to low and block promote/get/gate — void the lying instrument's runs.  
+   to low and block promote/get/gate — void the lying instrument's runs, OR
+   if the spread is genuinely irreducible:
+   `terra known accept-spread <id> --reason "…"` — reads unblock carrying
+   `uncertainty`+`band`, confidence caps at med, widening spread re-trips,
+   agreement clears. Related-but-distinct quantities are NOT a disagreement;
+   med is their honest ceiling until a real second method exists.  
 12. Prefer `terra map status` over chat memory.
 
 ## Survey loop
@@ -161,7 +166,7 @@ probes → runs → knowns/unknowns (number | boolean | formula)
 
 ```bash
 terra unknown create | link-probe | link-run | graduate [--with|--into] | show | status | unlink-run | delete
-terra known get | depend | graph | tree | tolerance | reaffirm | link-run | promote | show | unlink-run | delete
+terra known get | depend | graph | tree | tolerance | accept-spread | reaffirm | link-run | promote | show | unlink-run | delete
 terra design add | attach | check | refresh | get | remove | detach
 terra gate       # mechanical debt check (all maps + design)
 terra plan create | link-run --leg | promote | show

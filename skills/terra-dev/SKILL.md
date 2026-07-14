@@ -209,7 +209,13 @@ Hard opinions: high needs ≥2 agreeing methods (single method caps at med;
 collapses derived to low and blocks promote/get/gate (`--allow-disagree`
 escape on get). Tolerance: `--within` at unknown create (carried through
 graduate) or `terra known tolerance <id> --within X`. Formula type exempt.
-Tests: `tests/test_corroboration.py`.
+Accept-spread: `known accept-spread --reason` stamps `accepted_spread`
+{spread, band}; `reconcile_accepted_spread` (corroboration.py) re-judges on
+every recompute — within stamp → corr.accepted=True (reads unblock with
+uncertainty+band, derived caps med, gate/attention downgrade); spread grew →
+accepted=False, full alarm; agree=True → stamp dropped. `methods_disagree()`
+= unaccepted disagreement only.
+Tests: `tests/test_corroboration.py`, `tests/test_accept_spread.py`.
 
 ### 14. Route hardening: evidence refs, cycles, aging
 
@@ -221,7 +227,14 @@ refuse prose-only complete — `--freehand '<reason>'` is the recorded escape.
 `route_status().attention`: task_blocked, task_stalled (in_progress ≥7d,
 STALL_DAYS). Tests: `tests/test_route_evidence.py`.
 
-### 15. Design layer: baseline + artifacts
+### 15. Probe loader bypasses the pyc cache
+
+`load_probe_module` compiles probe.py straight from source (no importlib
+SourceFileLoader): pyc validation is mtime+size, so a probe edited twice in
+the same second with equal file size silently ran STALE bytecode (surfaced
+by accept-spread tests). Never reintroduce spec_from_file_location there.
+
+### 16. Design layer: baseline + artifacts
 
 `src/terra/design.py`, store `.terra/design.json` (project-wide, like
 brief/route; params sourced from GLOBAL map only via scoped_map). Admission
@@ -232,7 +245,7 @@ Artifacts stamp file sha256 + params_at; drift/regen detection in
 map_id="design". `design get` wraps read_known(min_conf=med) on global.
 Tests: `tests/test_design.py`.
 
-### 16. Budget vs plan vs actual vs sectors
+### 17. Budget vs plan vs actual vs sectors
 
 - `brief.budget_points` = authorized total (terra-brief).  
 - `route.sectors[]` = reserved provisions (`reserved_points`).  
