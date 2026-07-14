@@ -53,7 +53,7 @@ terra map create exp --use
 terra unknown create u --type number --quantity q --claim "c?" --evidence "e"
 terra probe create p --purpose "p" --kind watch
 # implement measures; validate; run --json; link-run; unknown graduate → known
-# known get/depend/reaffirm; terra gate; void
+# known get/depend/reaffirm; design add/attach/check; terra gate; void
 terra map status --all              # MUST see session attention when active=global
 
 # budget / plan lock (if you touched brief.py / route.py)
@@ -217,7 +217,18 @@ refuse prose-only complete — `--freehand '<reason>'` is the recorded escape.
 `route_status().attention`: task_blocked, task_stalled (in_progress ≥7d,
 STALL_DAYS). Tests: `tests/test_route_evidence.py`.
 
-### 15. Budget vs plan vs actual vs sectors
+### 15. Design layer: baseline + artifacts
+
+`src/terra/design.py`, store `.terra/design.json` (project-wide, like
+brief/route; params sourced from GLOBAL map only via scoped_map). Admission
+bar in `_known_admission_problems` (≥med, backed, agree≠False, not stale).
+Params pin known_updated_at; moved known → red + `design refresh` re-pins.
+Artifacts stamp file sha256 + params_at; drift/regen detection in
+`check_design` (computed, never stored). Gate appends design violations with
+map_id="design". `design get` wraps read_known(min_conf=med) on global.
+Tests: `tests/test_design.py`.
+
+### 16. Budget vs plan vs actual vs sectors
 
 - `brief.budget_points` = authorized total (terra-brief).  
 - `route.sectors[]` = reserved provisions (`reserved_points`).  

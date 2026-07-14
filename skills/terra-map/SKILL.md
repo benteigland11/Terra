@@ -21,7 +21,7 @@ Procedure is split so each skill is one job. **Open the child skill** and follow
 | **terra-start** | `terra init` + brief + route skeleton + budget |
 | **terra-brief** | needs, deliverables, enablers, **budget_points**, propose/accept |
 | **terra-route** | lead loop, buckets 3/8/21, **lock-plan / set-effort / budget** |
-| **terra-survey** | unknown → probe run → known/plan → void; types |
+| **terra-survey** (incl. `terra design` baseline + artifacts) | unknown → probe run → known/plan → void; types |
 | **terra-scopes** | global vs session maps |
 | **terra-probe** | implement/validate/run instruments |
 

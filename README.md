@@ -136,6 +136,16 @@ from terra.readings import known      # in probes/tools
 MTOW = known("mtow")["value"]
 ```
 
+**Design layer** ([docs/design.md](docs/design.md)) — the validated baseline
+deliverable files link to:
+
+```bash
+terra design add mtow                 # admit known (global, ≥med, agreeing, fresh)
+terra design attach prints/three_view.pdf --uses mtow
+terra design check --human            # red when knowns move / files drift
+terra design get mtow --raw           # generators read THE design value
+```
+
 **Suites** (ordered recipes, shared `to` — not domain plugins):
 
 ```bash

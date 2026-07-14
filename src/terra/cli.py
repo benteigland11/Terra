@@ -1298,6 +1298,136 @@ def cmd_known_tree(args: argparse.Namespace) -> int:
     return emit(success(tree, meta={"surface": "terra.known.tree"}))
 
 
+def cmd_design_add(args: argparse.Namespace) -> int:
+    from .design import add_param
+
+    try:
+        root = require_project_root()
+        entry = add_param(
+            root, args.known_id, name=args.as_name, force=args.force
+        )
+    except (ValueError, FileExistsError, FileNotFoundError, OSError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    print(
+        f"design param {entry['name']}  known={entry['known_id']}  "
+        f"value={entry['value_at_admission']}{entry.get('unit') or ''}  "
+        f"conf={entry['confidence_at_admission']}"
+    )
+    return 0
+
+
+def cmd_design_refresh(args: argparse.Namespace) -> int:
+    from .design import refresh_param
+
+    try:
+        root = require_project_root()
+        entry = refresh_param(root, args.name)
+    except (ValueError, FileNotFoundError, OSError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    print(
+        f"design param {entry['name']} re-pinned  "
+        f"value={entry['value_at_admission']}  "
+        f"conf={entry['confidence_at_admission']}"
+    )
+    return 0
+
+
+def cmd_design_remove(args: argparse.Namespace) -> int:
+    from .design import remove_param
+
+    try:
+        root = require_project_root()
+        remove_param(root, args.name)
+    except (ValueError, FileNotFoundError, OSError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    print(f"design param {args.name} removed")
+    return 0
+
+
+def cmd_design_get(args: argparse.Namespace) -> int:
+    from .design import get_param
+
+    try:
+        root = require_project_root()
+        reading = get_param(root, args.name, consumer=args.consumer)
+    except (ValueError, FileNotFoundError, OSError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    if args.raw:
+        print(reading["value"])
+        return 0
+    print(json.dumps(reading, indent=2, sort_keys=True, default=str))
+    return 0
+
+
+def cmd_design_attach(args: argparse.Namespace) -> int:
+    from .design import attach_artifact
+
+    try:
+        root = require_project_root()
+        uses = [u.strip() for u in (args.uses or "").split(",") if u.strip()]
+        entry = attach_artifact(root, args.path, uses=uses)
+    except (ValueError, FileNotFoundError, OSError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    print(
+        f"attached {entry['path']}  uses={entry['uses']}  "
+        f"sha={str(entry.get('sha256'))[:12]}…"
+    )
+    return 0
+
+
+def cmd_design_detach(args: argparse.Namespace) -> int:
+    from .design import detach_artifact
+
+    try:
+        root = require_project_root()
+        detach_artifact(root, args.path)
+    except (FileNotFoundError, OSError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    print(f"detached {args.path}")
+    return 0
+
+
+def cmd_design_check(args: argparse.Namespace) -> int:
+    """Design health: exit 0 iff every param + artifact is green."""
+    from .agent_io import emit, error, success
+    from .design import check_design
+
+    try:
+        root = require_project_root()
+        result = check_design(root)
+    except (ValueError, FileNotFoundError, OSError) as e:
+        return emit(error(str(e), code="design_check"))
+    if getattr(args, "human", False):
+        c = result["counts"]
+        flag = "OK" if result["ok"] else "RED"
+        print(
+            f"DESIGN {flag}  params={c['params']} ({c['params_red']} red)  "
+            f"artifacts={c['artifacts']} ({c['artifacts_red']} red)"
+        )
+        for p in result["params"]:
+            mark = "✓" if p["ok"] else "✗"
+            print(
+                f"  {mark} {p['name']} = {p.get('current_value')}"
+                f"{p.get('unit') or ''}  [{p.get('current_confidence')}]"
+            )
+            for r in p.get("reasons") or []:
+                print(f"      ! {r}")
+        for a in result["artifacts"]:
+            mark = "✓" if a["ok"] else "✗"
+            print(f"  {mark} {a['path']}  uses={a.get('uses')}")
+            for r in a.get("reasons") or []:
+                print(f"      ! {r}")
+        return 0 if result["ok"] else 1
+    emit(success(result, meta={"surface": "terra.design.check"}))
+    return 0 if result["ok"] else 1
+
+
 def cmd_gate(args: argparse.Namespace) -> int:
     """Mechanical gate: exit 0 clean, exit 1 with violations. CI-able."""
     from .agent_io import emit, error, success
@@ -2998,6 +3128,69 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_ben.add_argument("--notes", default=None)
     p_ben.set_defaults(func=cmd_brief_enabler)
+
+    # --- design (stable baseline: graduated knowns + attached artifacts) ---
+    p_dsn = sub.add_parser(
+        "design",
+        help="Stable design baseline: admit knowns as params, attach "
+        "deliverable files, check goes red when anything moves",
+    )
+    dsn_sub = p_dsn.add_subparsers(dest="design_cmd", required=True)
+
+    p_da = dsn_sub.add_parser(
+        "add",
+        help="Admit a GLOBAL-map known (>=med, backed, agreeing, fresh)",
+    )
+    p_da.add_argument("known_id")
+    p_da.add_argument(
+        "--as", dest="as_name", default=None, help="Param name (default: known id)"
+    )
+    p_da.add_argument("--force", action="store_true", help="Replace existing param")
+    p_da.set_defaults(func=cmd_design_add)
+
+    p_drf = dsn_sub.add_parser(
+        "refresh", help="Re-pin a param after its known legitimately moved"
+    )
+    p_drf.add_argument("name")
+    p_drf.set_defaults(func=cmd_design_refresh)
+
+    p_drm = dsn_sub.add_parser("remove", help="Remove a param (refuses if artifacts use it)")
+    p_drm.add_argument("name")
+    p_drm.set_defaults(func=cmd_design_remove)
+
+    p_dg = dsn_sub.add_parser(
+        "get", help="Read a design value (live known, admission bar enforced)"
+    )
+    p_dg.add_argument("name")
+    p_dg.add_argument("--raw", action="store_true")
+    p_dg.add_argument("--consumer", default=None)
+    p_dg.set_defaults(func=cmd_design_get)
+
+    p_dat = dsn_sub.add_parser(
+        "attach",
+        help="Stamp a deliverable file against the design params it was built from",
+    )
+    p_dat.add_argument("path")
+    p_dat.add_argument(
+        "--uses", required=True, help="Comma-separated design param names"
+    )
+    p_dat.set_defaults(func=cmd_design_attach)
+
+    p_ddt = dsn_sub.add_parser("detach", help="Remove an artifact stamp")
+    p_ddt.add_argument("path")
+    p_ddt.set_defaults(func=cmd_design_detach)
+
+    p_dc = dsn_sub.add_parser(
+        "check",
+        help="Design health (exit 1 if any param/artifact is red); "
+        "`show` is an alias",
+    )
+    p_dc.add_argument("--human", action="store_true")
+    p_dc.set_defaults(func=cmd_design_check)
+
+    p_ds = dsn_sub.add_parser("show", help="Alias of check (the design card)")
+    p_ds.add_argument("--human", action="store_true")
+    p_ds.set_defaults(func=cmd_design_check)
 
     # --- gate (mechanical debt collector) ---
     p_gate = sub.add_parser(

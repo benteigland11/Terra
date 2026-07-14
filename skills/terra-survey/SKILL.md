@@ -3,7 +3,7 @@ name: terra-survey
 description: >
   REQUIRED for Terra map beliefs and evidence: unknown create/link/resolve,
   unknown graduate (known birth), known get/depend/tolerance/reaffirm/link/promote,
-  corroboration (methods agree), gate,
+  corroboration (methods agree), design add/attach/check (stable baseline), gate,
   plan create/link/promote, run void/list, typed
   number|boolean|formula, claim-shaped analysis without freehand, n-ladder /
   promote rules. Fire on fog, "open an unknown", encode a known, formula gate,
@@ -107,6 +107,19 @@ from terra.readings import known    # in probes/tools — never hardcode a copy
 mtow = known("mtow")["value"]
 ```
 
+### 4c. Graduate into the design (stable baseline)
+
+```bash
+terra design add <known> [--as <param>]   # global map, ≥med, backed, agreeing, fresh
+terra design attach <file> --uses <p1,p2> # stamp deliverable against params
+terra design check                        # red: known moved / file drifted / missing
+terra design refresh <param>              # re-pin after a reviewed move
+terra design get <param> --raw            # generators read the design value
+```
+
+Design is project-wide, sourced from **global** only; params are live links
+(known moves → param red → attached files flagged REGENERATE → gate fails).
+
 ### 5. Multi-leg → plan
 
 ```bash
@@ -141,7 +154,8 @@ probes → runs → knowns/unknowns (number | boolean | formula)
 ```bash
 terra unknown create | link-probe | link-run | graduate | show | status | unlink-run | delete
 terra known get | depend | graph | tree | tolerance | reaffirm | link-run | promote | show | unlink-run | delete
-terra gate       # mechanical debt check (all maps)
+terra design add | attach | check | refresh | get | remove | detach
+terra gate       # mechanical debt check (all maps + design)
 terra plan create | link-run --leg | promote | show
 terra run list | show | void | delete
 terra map status

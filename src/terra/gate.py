@@ -6,6 +6,7 @@
   - no stale knowns (dependency moved without re-derivation)
   - no knowns whose independent methods disagree beyond tolerance
   - no unsatisfied evidence plans
+  - no red design params/artifacts (moved knowns, unregenerated files)
 
 Route integration: completing a ``deliverable`` task requires the gate to
 pass (or an explicit recorded override).
@@ -130,6 +131,11 @@ def check_gate(
     violations: list[dict[str, Any]] = []
     for mid in map_ids:
         violations.extend(_collect_map_violations(project_root, mid))
+    # Design layer is project-wide: red params/artifacts fail release
+    from .design import check_design
+
+    for v in check_design(project_root)["violations"]:
+        violations.append({**v, "map_id": "design"})
     return {
         "ok": not violations,
         "maps_checked": map_ids,
