@@ -175,6 +175,10 @@ def cmd_map_create(args: argparse.Namespace) -> int:
     print("  probes/lib stay global; unknowns/knowns/runs/suites are scoped here")
     if args.use:
         print(f"  active map → {args.id}")
+        print(
+            "  NOTE: unknowns/knowns/runs you create now land on "
+            f"'{args.id}', not global — back: terra map use global"
+        )
     else:
         print(f"  use: terra map use {args.id}   or  --map {args.id}")
     return 0
@@ -207,8 +211,14 @@ def cmd_map_use(args: argparse.Namespace) -> int:
     except (ValueError, FileNotFoundError, OSError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
-    print(f"active map → {get_active_map_id(root)}")
+    active = get_active_map_id(root)
+    print(f"active map → {active}")
     print(f"  belief path: {map_root(root)}")
+    if active != "global":
+        print(
+            "  NOTE: beliefs/runs now land on this session map — durable "
+            "results belong on global (terra map use global)"
+        )
     return 0
 
 
@@ -707,7 +717,20 @@ def cmd_route_start(args: argparse.Namespace) -> int:
         t = start_task(root, args.id)
     except (FileNotFoundError, ValueError, OSError) as e:
         return emit(error(str(e), code="route_start"))
-    return emit(success(t, meta={"surface": "terra.route.start"}))
+    meta: dict[str, Any] = {"surface": "terra.route.start"}
+    from .route import load_route
+
+    others = [
+        x.get("id")
+        for x in load_route(root).get("tasks") or []
+        if x.get("status") == "in_progress" and x.get("id") != args.id
+    ]
+    if others:
+        meta["note"] = (
+            f"also in_progress: {others} — complete/block before they go "
+            f"stale (route status flags >=7d)"
+        )
+    return emit(success(t, meta=meta))
 
 
 def cmd_route_complete(args: argparse.Namespace) -> int:
@@ -1379,6 +1402,19 @@ def cmd_design_refresh(args: argparse.Namespace) -> int:
         f"value={entry['value_at_admission']}  "
         f"conf={entry['confidence_at_admission']}"
     )
+    from .design import load_design
+
+    stale_artifacts = [
+        a.get("path")
+        for a in load_design(root).get("artifacts") or []
+        if entry["name"] in (a.get("uses") or [])
+    ]
+    if stale_artifacts:
+        print(
+            f"  NOTE: artifacts built from {entry['name']} are now stale: "
+            f"{stale_artifacts} — REGENERATE each, then\n"
+            f"    terra design attach <path> --uses …"
+        )
     return 0
 
 
@@ -1601,6 +1637,17 @@ def cmd_unknown_status(args: argparse.Namespace) -> int:
         print(f"error: {e}", file=sys.stderr)
         return 1
     print(f"unknown {rec['id']}  status={rec['status']}")
+    if (
+        args.status == "resolved"
+        and rec.get("type")
+        and (rec.get("run_ids") or [])
+        and not str(rec.get("resolved_by") or "").startswith("known:")
+    ):
+        print(
+            f"  NOTE: this unknown is typed with linked runs — a prose "
+            f"resolve keeps NO durable anchor. If the answer should live "
+            f"on:\n    terra unknown graduate {rec['id']}"
+        )
     return 0
 
 
@@ -1738,6 +1785,13 @@ def cmd_known_unlink_run(args: argparse.Namespace) -> int:
         print(f"  n={st.get('n')}  rate={st.get('rate')}")
     else:
         print(f"  n={st.get('n')}  mean={st.get('mean')}  std={st.get('std')}")
+    if not (st.get("n") or 0):
+        print(
+            f"  NOTE: known {rec['id']} is now unbacked (n=0) — reads and "
+            f"the gate will refuse it. Re-back or delete:\n"
+            f"    terra known link-run {rec['id']} <run_id>\n"
+            f"    terra known delete {rec['id']}"
+        )
     return 0
 
 
@@ -1899,11 +1953,33 @@ def cmd_plan_delete(args: argparse.Namespace) -> int:
 def cmd_known_delete(args: argparse.Namespace) -> int:
     try:
         root = require_project_root()
+        from .design import load_design
+        from .readings import list_consumers
+
+        params = [
+            p.get("name")
+            for p in load_design(root).get("params") or []
+            if p.get("known_id") == args.id
+        ]
+        consumers = [
+            c.get("consumer") for c in list_consumers(root, args.id)
+        ]
         path = delete_known(root, args.id)
     except (FileNotFoundError, OSError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
     print(f"deleted known {args.id}  ({path})")
+    if params:
+        print(
+            f"  NOTE: design param(s) {params} still reference this known — "
+            f"design check will go red; terra design remove <param> or "
+            f"re-survey and terra design add"
+        )
+    if consumers:
+        print(
+            f"  NOTE: consumers read this known: {consumers} — they now "
+            f"break loudly on next read (that is the point)"
+        )
     return 0
 
 
@@ -2092,6 +2168,34 @@ def cmd_probe_run(args: argparse.Namespace) -> int:
     time = stamp.get("time") or {}
     if time.get("duration_s") is not None:
         print(f"  duration_s: {time.get('duration_s')}")
+    if not args.dry_run:
+        try:
+            from .knowns import list_knowns
+            from .unknowns import list_unknowns
+
+            open_unk = [
+                str((u.get("record") or {}).get("id") or u.get("id"))
+                for u in list_unknowns(root)
+                if (u.get("record") or {}).get("status")
+                in ("open", "probing", "blocked")
+                and args.id in ((u.get("record") or {}).get("probe_ids") or [])
+            ]
+            linked_kn = [
+                str((k.get("record") or {}).get("id") or k.get("id"))
+                for k in list_knowns(root)
+                if args.id in ((k.get("record") or {}).get("probe_ids") or [])
+            ]
+        except (OSError, ValueError):
+            open_unk, linked_kn = [], []
+        for uid in open_unk:
+            print(f"  next: terra unknown link-run {uid} {stamp['id']}")
+        for kid in linked_kn:
+            print(f"  next: terra known link-run {kid} {stamp['id']}")
+        if (open_unk or linked_kn) and not stamp.get("measures"):
+            print(
+                "  NOTE: this run emitted no measures[] — linked typed "
+                "unknowns/knowns will not gain samples from it"
+            )
     return 0
 
 
@@ -2205,6 +2309,19 @@ def cmd_run_void(args: argparse.Namespace) -> int:
             f"unknowns={u.get('unknowns') or []}  "
             f"plans={u.get('plans') or []}"
         )
+        still = (u.get("knowns") or []) + (u.get("unknowns") or [])
+        if still:
+            print(
+                f"  NOTE: {still} still reference this voided run "
+                f"(--no-cascade) — stats exclude it, but unlink or re-void "
+                f"with cascade if the link itself was the mistake"
+            )
+    if result.get("cascade") and (u.get("knowns") or []):
+        print(
+            "  NOTE: unlinked knowns may now be unbacked (n=0) — "
+            "terra map status will flag known_unbacked; re-run + link or "
+            "delete them"
+        )
     print("  next agent will not use this sample in stats")
     return 0
 
@@ -2313,6 +2430,7 @@ def cmd_probe_validate(args: argparse.Namespace) -> int:
     # Package id or path to package dir
     cand = Path(target)
     if cand.is_dir() and (cand / "probe.json").is_file():
+        pdir = cand
         result = validate_probe_dir(cand)
     else:
         pdir = probe_dir(root, target)
@@ -2323,7 +2441,28 @@ def cmd_probe_validate(args: argparse.Namespace) -> int:
             )
             return 1
         result = validate_probe_dir(pdir)
-    return _print_probe_result(result, json_out=args.json)
+    rc = _print_probe_result(result, json_out=args.json)
+    if rc == 0 and not args.json:
+        try:
+            src = (pdir / "probe.py").read_text(encoding="utf-8")
+        except OSError:
+            src = ""
+        if "TODO: implement" in src or "scaffold stub" in src:
+            print(
+                "  NOTE: this is still the scaffold stub — it validates but "
+                "measures nothing real; implement run() before trusting runs"
+            )
+        elif "measures" not in src:
+            print(
+                "  NOTE: probe.py emits no measures[] — typed unknowns/"
+                "knowns (number/boolean/relation) need "
+                "{'quantity': …, 'value': …} rows to gain samples"
+            )
+        print(
+            "  NOTE: validate PASS ≠ surveyed — the reading is "
+            "`terra probe run … --json` + link-run"
+        )
+    return rc
 
 
 def cmd_probe_list(args: argparse.Namespace) -> int:

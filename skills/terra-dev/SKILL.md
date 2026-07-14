@@ -122,10 +122,24 @@ terra --map night_trial unknown show hostiles
 
 Probes are **global**; runs land on **active** map. Wrong active map = silent wrong store.
 
-### 3. Scaffold probes validate PASS
+### 3. Scaffold probes validate PASS (now self-announcing)
 
 Bare `terra probe create` scaffolds a dry-friendly stub that **level-1 validates**.  
-Agents must not treat validate PASS as "surveyed" — still need live `probe run` + measures + link.
+Agents must not treat validate PASS as "surveyed" — still need live `probe run` + measures + link.  
+`probe validate <id>` now prints agent NOTEs: scaffold-stub detection
+("TODO: implement"/"scaffold stub" markers), no-measures detection, and the
+standing "validate PASS ≠ surveyed" reminder.
+
+**Agent-notes pattern** (house style): at likely-mistake moments, do not
+block and do not stay silent — print a `NOTE:` with the copy-pasteable
+correction (real ids, real run ids). Current sites: link-run on resolved
+unknown, probe validate (stub/no-measures/not-surveyed), probe run (link-run
+next hints, no-measures), map create --use / map use session (wrong-map),
+run void (--no-cascade leftovers, cascade→unbacked), known unlink-run →
+unbacked, prose resolve on graduatable unknown, route start (parallel
+in_progress, via envelope meta.note), known delete (design params +
+consumers), design refresh (attached artifacts → REGENERATE).
+Tests: `tests/test_agent_notes.py`. When adding a surface, add a note test.
 
 ### 4. Run id is not in human status line alone
 
