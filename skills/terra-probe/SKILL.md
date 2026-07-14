@@ -207,3 +207,11 @@ Beliefs → **terra-survey**. Scopes → **terra-scopes**. Route → **terra-rou
 6. Eng packages: probe covers the current claim family.
 
 Stopping at scaffold, validate-only, or “ran the tool outside Terra” = incomplete.
+## Probes are methods (corroboration)
+
+A second *independent* probe for the same quantity is how a known reaches
+`high` — repetition of one instrument proves precision, not truth. Build the
+second method differently (e.g. CAD mass-properties vs spreadsheet buildup),
+emit the **same quantity name**, and link runs to the same known. Terra
+groups stats per probe and judges agreement against the known's
+`--within` tolerance (**terra-survey**).

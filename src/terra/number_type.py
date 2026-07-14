@@ -68,17 +68,24 @@ def compute_number_stats(values: list[float]) -> dict[str, Any]:
 
 
 def derive_confidence_number(stats: dict[str, Any]) -> str:
-    """low: n>=1; med: n>=3 or (n>=2 and std); high: n>=5 and tight std/mean."""
+    """low: n>=1; med: n>=3 or (n>=2 and std); high: n>=5, tight std/mean,
+    AND >=2 methods agreeing (corroboration). Disagreeing methods → low."""
+    from .corroboration import corroboration_gate_high, methods_disagree
+
+    if methods_disagree(stats):
+        return "low"
     n = int(stats.get("n") or 0)
     if n < 1:
         return "low"
     std = stats.get("std")
     mean = stats.get("mean")
     if n >= 5 and std is not None and mean is not None:
-        if mean == 0:
-            if std == 0:
-                return "high"
-        elif abs(float(std) / abs(float(mean))) <= 0.5:
+        tight = (
+            (std == 0)
+            if mean == 0
+            else abs(float(std) / abs(float(mean))) <= 0.5
+        )
+        if tight and corroboration_gate_high(stats)[0]:
             return "high"
     if n >= 3 or (n >= 2 and std is not None):
         return "med"
@@ -133,12 +140,22 @@ def compute_boolean_stats(values: list[bool]) -> dict[str, Any]:
 
 
 def derive_confidence_boolean(stats: dict[str, Any]) -> str:
-    """low: n>=1; med: n>=3; high: n>=5 and unanimous (rate 0 or 1)."""
+    """low: n>=1; med: n>=3; high: n>=5 unanimous AND >=2 methods agreeing.
+    Disagreeing methods → low."""
+    from .corroboration import corroboration_gate_high, methods_disagree
+
+    if methods_disagree(stats):
+        return "low"
     n = int(stats.get("n") or 0)
     if n < 1:
         return "low"
     rate = stats.get("rate")
-    if n >= 5 and rate is not None and (rate == 0.0 or rate == 1.0):
+    if (
+        n >= 5
+        and rate is not None
+        and (rate == 0.0 or rate == 1.0)
+        and corroboration_gate_high(stats)[0]
+    ):
         return "high"
     if n >= 3:
         return "med"
@@ -182,6 +199,22 @@ def can_claim_confidence(
         from .formula_type import can_claim_formula_confidence
 
         return can_claim_formula_confidence(stats, want)
+
+    from .corroboration import corroboration_gate_high, methods_disagree
+
+    if methods_disagree(stats):
+        corr = stats.get("corroboration") or {}
+        return (
+            False,
+            f"cannot claim confidence={want!r}: methods DISAGREE "
+            f"(spread={corr.get('spread')!r} vs tolerance="
+            f"{corr.get('tolerance')!r}) — one instrument is wrong; "
+            f"void the bad evidence or fix the probe",
+        )
+    if want == "high":
+        ok_corr, why = corroboration_gate_high(stats)
+        if not ok_corr:
+            return False, f"cannot claim confidence='high': {why}"
     if kind == "boolean":
         return (
             False,
@@ -362,6 +395,7 @@ def recompute_typed_node(
 
     all_values: list[Any] = []
     sample_runs: list[dict[str, Any]] = []
+    values_by_probe: dict[str, list[Any]] = {}
     for rid in record.get("run_ids") or []:
         if not isinstance(rid, str):
             continue
@@ -389,11 +423,19 @@ def recompute_typed_node(
         vals = extract_measures_from_run_dir(
             rdir, meta, quantity=quantity, map_type=map_type
         )
-        sample_runs.append({"run_id": rid, "n": len(vals), "values": vals})
+        pid = meta.get("probe_id") or "unknown_probe"
+        sample_runs.append(
+            {"run_id": rid, "probe_id": pid, "n": len(vals), "values": vals}
+        )
+        values_by_probe.setdefault(pid, []).extend(vals)
         all_values.extend(vals)
 
     if map_type == "boolean":
         stats = compute_boolean_stats([v for v in all_values if isinstance(v, bool)])
+        by_probe = {
+            pid: compute_boolean_stats([v for v in vals if isinstance(v, bool)])
+            for pid, vals in values_by_probe.items()
+        }
     else:
         stats = compute_number_stats(
             [
@@ -402,7 +444,27 @@ def recompute_typed_node(
                 if isinstance(v, (int, float)) and not isinstance(v, bool)
             ]
         )
+        by_probe = {
+            pid: compute_number_stats(
+                [
+                    float(v)
+                    for v in vals
+                    if isinstance(v, (int, float)) and not isinstance(v, bool)
+                ]
+            )
+            for pid, vals in values_by_probe.items()
+        }
     stats["by_run"] = sample_runs
+    # Corroboration: the second evidence axis (independent methods agree?)
+    from .corroboration import compute_corroboration
+
+    for g in by_probe.values():
+        g.pop("by_run", None)
+        g.pop("values", None)
+    stats["by_probe"] = by_probe
+    stats["corroboration"] = compute_corroboration(
+        by_probe, map_type=map_type, tolerance=record.get("tolerance")
+    )
     record = dict(record)
     record["stats"] = stats
     record["confidence_derived"] = derive_confidence(stats, map_type=map_type)

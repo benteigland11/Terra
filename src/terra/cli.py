@@ -873,6 +873,7 @@ def cmd_unknown_create(args: argparse.Namespace) -> int:
             unit=getattr(args, "unit", "") or "",
             expression=getattr(args, "expression", None),
             vars=getattr(args, "vars", None),
+            tolerance=getattr(args, "within", None),
         )
     except (ValueError, FileExistsError, OSError) as e:
         print(f"error: {e}", file=sys.stderr)
@@ -1140,6 +1141,26 @@ def cmd_known_show(args: argparse.Namespace) -> int:
                 f"stats: n={st.get('n')}  mean={st.get('mean')}  std={st.get('std')}  "
                 f"min={st.get('min')}  max={st.get('max')}"
             )
+    by_probe = st.get("by_probe") or {}
+    if by_probe:
+        for pid, g in sorted(by_probe.items()):
+            if rec.get("type") == "boolean":
+                print(f"  method {pid}: n={g.get('n')} rate={g.get('rate')}")
+            else:
+                print(f"  method {pid}: n={g.get('n')} mean={g.get('mean')} std={g.get('std')}")
+    corr = st.get("corroboration") or {}
+    if corr:
+        line = (
+            f"corroboration: methods={corr.get('methods')} "
+            f"agree={corr.get('agree')}"
+        )
+        if corr.get("spread") is not None:
+            line += f"  spread={corr.get('spread')}"
+        if corr.get("tolerance") is not None:
+            line += f"  tolerance={corr.get('tolerance')}"
+        print(line)
+        if corr.get("agree") is False:
+            print("METHODS DISAGREE — one instrument is wrong; void bad evidence or fix the probe")
     print(f"run_ids: {rec.get('run_ids') or []}")
     deps = rec.get("deps") or {}
     if deps.get("knowns") or deps.get("files"):
@@ -1172,6 +1193,7 @@ def cmd_known_get(args: argparse.Namespace) -> int:
             args.id,
             min_conf=args.min_conf,
             allow_stale=bool(args.allow_stale),
+            allow_disagree=bool(getattr(args, "allow_disagree", False)),
             consumer=args.consumer,
         )
     except (ValueError, FileNotFoundError, OSError) as e:
@@ -1214,6 +1236,23 @@ def cmd_known_reaffirm(args: argparse.Namespace) -> int:
     print(
         f"reaffirmed known {rec['id']} "
         f"(deps re-stamped; trail in record.reaffirmed)"
+    )
+    return 0
+
+
+def cmd_known_tolerance(args: argparse.Namespace) -> int:
+    from .knowns import set_tolerance
+
+    try:
+        root = require_project_root()
+        rec = set_tolerance(root, args.id, within=args.within)
+    except (ValueError, FileNotFoundError, OSError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    corr = (rec.get("stats") or {}).get("corroboration") or {}
+    print(
+        f"known {rec['id']}  tolerance={rec.get('tolerance')}  "
+        f"methods={corr.get('methods')}  agree={corr.get('agree')}"
     )
     return 0
 
@@ -2439,6 +2478,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_uc.add_argument("--probe", default=None, help="Optional linked probe id")
     p_uc.add_argument("--notes", default="", help="Freeform notes")
     p_uc.add_argument("--force", action="store_true")
+    p_uc.add_argument(
+        "--within",
+        default=None,
+        help="Method-agreement tolerance for corroboration (e.g. 5%% or 0.5); "
+        "carried through graduate",
+    )
     p_uc.set_defaults(func=cmd_unknown_create)
 
     p_ul = unk_sub.add_parser("list", help="List unknowns")
@@ -2646,6 +2691,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Read even if a dependency moved (recorded, not recommended)",
     )
     p_kg.add_argument(
+        "--allow-disagree",
+        dest="allow_disagree",
+        action="store_true",
+        help="Read even while methods disagree (recorded, not recommended)",
+    )
+    p_kg.add_argument(
         "--consumer",
         default=None,
         help="Reader identity (default: probe ctx / $TERRA_CONSUMER / tool:argv0)",
@@ -2682,6 +2733,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_ktr.add_argument("id")
     p_ktr.add_argument("--human", action="store_true", help="Text output")
     p_ktr.set_defaults(func=cmd_known_tree)
+
+    p_kt = kn_sub.add_parser(
+        "tolerance",
+        help="Declare method-agreement tolerance: --within 5%% (relative) "
+        "or --within 0.5 (absolute)",
+    )
+    p_kt.add_argument("id")
+    p_kt.add_argument("--within", required=True)
+    p_kt.set_defaults(func=cmd_known_tolerance)
 
     p_kra = kn_sub.add_parser(
         "reaffirm",

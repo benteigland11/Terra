@@ -42,6 +42,7 @@ def build_graph(project_root: Path) -> dict[str, Any]:
     for kid, rec in knowns.items():
         info = stale.get(kid) or {}
         stats = rec.get("stats") or {}
+        corr = (rec.get("stats") or {}).get("corroboration") or {}
         nodes[f"known:{kid}"] = {
             "id": f"known:{kid}",
             "kind": "known",
@@ -49,6 +50,8 @@ def build_graph(project_root: Path) -> dict[str, Any]:
             "type": rec.get("type"),
             "confidence": rec.get("confidence"),
             "n": stats.get("n"),
+            "methods": corr.get("methods"),
+            "methods_agree": corr.get("agree"),
             "stale": bool(info.get("stale")),
             "stale_reasons": list(info.get("reasons") or []),
             "consumers": [
@@ -137,6 +140,11 @@ def _node_label(node: dict[str, Any]) -> str:
         return f"{bits[0]}  MISSING"
     meta = f"[{node.get('type')} n={node.get('n')} {node.get('confidence')}]"
     line = f"{bits[0]}  {meta}"
+    m = node.get("methods")
+    if m and m >= 2:
+        agree = node.get("methods_agree")
+        mark = "✓" if agree else ("✗ DISAGREE" if agree is False else "?")
+        line += f"  {m} methods {mark}"
     if node.get("stale"):
         line += "  STALE: " + "; ".join(node.get("stale_reasons") or [])
     return line

@@ -167,6 +167,16 @@ def collect_map_status(
                 ),
                 "n": ((k.get("record") or {}).get("stats") or {}).get("n"),
                 "runs": len((k.get("record") or {}).get("run_ids") or []),
+                "methods": (
+                    (((k.get("record") or {}).get("stats") or {}).get(
+                        "corroboration"
+                    ) or {}).get("methods")
+                ),
+                "methods_agree": (
+                    (((k.get("record") or {}).get("stats") or {}).get(
+                        "corroboration"
+                    ) or {}).get("agree")
+                ),
                 "stale": bool(
                     (stale_map.get(
                         str((k.get("record") or {}).get("id") or k.get("id"))
@@ -361,6 +371,29 @@ def _derive_agent_guidance(
                 )
 
         for k in scope.get("knowns") or []:
+            if k.get("methods_agree") is False:
+                kid = str(k.get("id") or "")
+                attention.append(
+                    attention_item(
+                        "methods_disagree",
+                        id=kid,
+                        severity="high",
+                        why=(
+                            f"known {kid} on map {mid}: independent probes "
+                            f"disagree beyond tolerance — one instrument is wrong"
+                        ),
+                        extra={"map_id": mid},
+                    )
+                )
+                next_actions.append(
+                    action(
+                        "known.show",
+                        ["terra", *map_flag, "known", "show", kid],
+                        why="compare per-probe stats; void bad evidence or fix the probe",
+                        priority=11,
+                        map_id=mid,
+                    )
+                )
             if k.get("stale"):
                 kid = str(k.get("id") or "")
                 attention.append(

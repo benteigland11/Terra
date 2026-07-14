@@ -110,8 +110,13 @@ terra unknown link-run est <run_id>
 terra unknown graduate est [--as <known_slug>]  # → known (low, provisional); resolves unknown
 terra known link-run est <run_id2>
 terra known promote est med   # blocks if n too small
-terra known show est          # n, mean, std
+terra known show est          # n, mean, std + per-method stats
 ```
+
+Two evidence axes ([docs/corroboration.md](docs/corroboration.md)):
+**repetition** (same probe, more runs → n-ladder) and **corroboration**
+(different probes agreeing within `--within 5%`). `high` needs ≥2 agreeing
+methods; disagreeing methods block promote/get/gate until resolved.
 
 `terra known create` is retired; a known whose evidence is later voided away
 shows up in `map status` attention as `known_unbacked`.

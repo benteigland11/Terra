@@ -27,8 +27,19 @@ def test_boolean_n1_low():
     assert derive_confidence(s, map_type="boolean") == "low"
 
 
-def test_boolean_high_unanimous():
+def test_boolean_high_needs_unanimity_and_corroboration():
+    # unanimous n=5 but single method → capped at med (repetition ≠ truth)
     s = compute_boolean_stats([True] * 5)
+    assert derive_confidence(s, map_type="boolean") == "med"
+    # two agreeing methods → high
+    s["by_probe"] = {
+        "a": compute_boolean_stats([True] * 3),
+        "b": compute_boolean_stats([True] * 2),
+    }
+    from terra.corroboration import compute_corroboration
+
+    s["corroboration"] = compute_corroboration(s["by_probe"], map_type="boolean")
+    assert s["corroboration"]["agree"] is True
     assert derive_confidence(s, map_type="boolean") == "high"
     s2 = compute_boolean_stats([True] * 4 + [False])
     assert derive_confidence(s2, map_type="boolean") == "med"

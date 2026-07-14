@@ -4,6 +4,7 @@
   - no active unknowns flagged blocks_build
   - no unbacked knowns (evidence voided/unlinked away)
   - no stale knowns (dependency moved without re-derivation)
+  - no knowns whose independent methods disagree beyond tolerance
   - no unsatisfied evidence plans
 
 Route integration: completing a ``deliverable`` task requires the gate to
@@ -66,6 +67,20 @@ def _collect_map_violations(
                     "id": kid,
                     "map_id": map_id,
                     "why": f"known {kid} has no live evidence (n={n})",
+                }
+            )
+        corr = ((rec.get("stats") or {}).get("corroboration")) or {}
+        if corr.get("agree") is False:
+            violations.append(
+                {
+                    "kind": "methods_disagree",
+                    "id": kid,
+                    "map_id": map_id,
+                    "why": (
+                        f"known {kid}: methods disagree "
+                        f"(spread={corr.get('spread')!r} vs tolerance="
+                        f"{corr.get('tolerance')!r})"
+                    ),
                 }
             )
         info = stale.get(str(kid)) or {}

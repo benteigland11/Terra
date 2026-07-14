@@ -136,6 +136,7 @@ def read_known(
     *,
     min_conf: str = "low",
     allow_stale: bool = False,
+    allow_disagree: bool = False,
     consumer: str | None = None,
     record: bool = True,
 ) -> dict[str, Any]:
@@ -169,6 +170,17 @@ def read_known(
             f"    terra known promote {known_id} {min_conf}"
         )
 
+    corr = stats.get("corroboration") or {}
+    if corr.get("agree") is False and not allow_disagree:
+        raise ValueError(
+            f"known {known_id}: methods DISAGREE "
+            f"(spread={corr.get('spread')!r}, tolerance="
+            f"{corr.get('tolerance')!r}) — one instrument is wrong; refusing "
+            f"to hand out a number until resolved.\n"
+            f"    terra known show {known_id}   # per-probe stats\n"
+            f"    terra run void <bad_run> --reason '…'  # or fix the probe"
+        )
+
     stale_info = compute_staleness(project_root).get(known_id) or {}
     if stale_info.get("stale") and not allow_stale:
         reasons = "; ".join(stale_info.get("reasons") or [])
@@ -194,6 +206,7 @@ def read_known(
         "stats": stats,
         "stale": bool(stale_info.get("stale")),
         "stale_reasons": list(stale_info.get("reasons") or []),
+        "corroboration": corr,
         "consumer": who,
     }
 

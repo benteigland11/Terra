@@ -57,6 +57,7 @@ def create_unknown(
     unit: str = "",
     expression: str | None = None,
     vars: dict[str, Any] | list[str] | str | None = None,
+    tolerance: Any = None,
 ) -> Path:
     if not _SLUG_RE.match(unknown_id):
         raise ValueError(
@@ -114,6 +115,11 @@ def create_unknown(
         record["unit"] = (unit or "").strip()
         record["stats"] = empty_stats(map_type)
         record["confidence_derived"] = "low"
+        if tolerance is not None:
+            from .corroboration import parse_tolerance
+
+            parse_tolerance(tolerance)  # loud on junk
+            record["tolerance"] = tolerance
     elif map_type == "formula":
         record["type"] = "formula"
         record["expression"] = expr

@@ -140,6 +140,7 @@ def create_known(
     run_ids: list[str] | None = None,
     probe_ids: list[str] | None = None,
     origin_unknown_id: str | None = None,
+    tolerance: Any = None,
 ) -> Path:
     if not _SLUG_RE.match(known_id):
         raise ValueError(f"known id {known_id!r} must match {_SLUG_RE.pattern}")
@@ -220,6 +221,11 @@ def create_known(
             raise FileNotFoundError(f"run not found: {rid}")
     if origin_unknown_id:
         record["origin_unknown_id"] = origin_unknown_id
+    if tolerance is not None:
+        from .corroboration import parse_tolerance
+
+        parse_tolerance(tolerance)  # loud on junk
+        record["tolerance"] = tolerance
     record = recompute_typed_node(
         record, project_root=project_root, run_dir_fn=run_dir
     )
@@ -307,6 +313,7 @@ def graduate_unknown(
         expression=unk.get("expression"),
         vars=unk.get("vars"),
         origin_unknown_id=unknown_id,
+        tolerance=unk.get("tolerance"),
     )
 
     unk["status"] = "resolved"
@@ -463,6 +470,19 @@ def add_dependency(
                 rows.append({"path": target, "sha256": None, "linked_at": _now()})
     stamp_deps(project_root, rec)
     save_known(project_root, rec)
+    return load_known(project_root, known_id)
+
+
+def set_tolerance(
+    project_root: Path, known_id: str, *, within: Any
+) -> dict[str, Any]:
+    """Declare method-agreement tolerance ('5%' rel or absolute number)."""
+    from .corroboration import parse_tolerance
+
+    parse_tolerance(within)  # loud on junk
+    rec = load_known(project_root, known_id)
+    rec["tolerance"] = within
+    save_known(project_root, rec)  # recompute re-judges corroboration
     return load_known(project_root, known_id)
 
 

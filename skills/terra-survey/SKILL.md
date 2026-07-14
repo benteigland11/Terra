@@ -2,7 +2,8 @@
 name: terra-survey
 description: >
   REQUIRED for Terra map beliefs and evidence: unknown create/link/resolve,
-  unknown graduate (known birth), known get/depend/reaffirm/link/promote, gate,
+  unknown graduate (known birth), known get/depend/tolerance/reaffirm/link/promote,
+  corroboration (methods agree), gate,
   plan create/link/promote, run void/list, typed
   number|boolean|formula, claim-shaped analysis without freehand, n-ladder /
   promote rules. Fire on fog, "open an unknown", encode a known, formula gate,
@@ -31,8 +32,13 @@ Instruments: **terra-probe**. Program tasks: **terra-route**.
 9. Declare deps (`known depend --on known:x --on file:y`); stale knowns must be
    re-derived (link-run) or `reaffirm`ed with a reason — never consumed silently.  
 10. `terra gate` is the debt collector: blocking unknowns, stale/unbacked
-   knowns, incomplete plans mechanically fail it (deliverable route tasks run it).  
-11. Prefer `terra map status` over chat memory.
+   knowns, disagreeing methods, incomplete plans mechanically fail it
+   (deliverable route tasks run it).  
+11. Two evidence axes: repetition (same probe, more runs) proves precision;
+   **corroboration** (different probes agreeing `--within` tolerance) proves
+   truth. `high` needs ≥2 agreeing methods; methods in disagreement collapse
+   to low and block promote/get/gate — void the lying instrument's runs.  
+12. Prefer `terra map status` over chat memory.
 
 ## Survey loop
 
@@ -44,7 +50,7 @@ terra map status
 
 ```bash
 terra unknown create <slug> --type number --quantity <q> \
-  --claim "…?" --evidence "…"
+  --claim "…?" --evidence "…" [--within 5%]   # method-agreement tolerance
 
 terra unknown create <slug> --type boolean --quantity <q> \
   --claim "…?" --evidence "…"
@@ -121,8 +127,8 @@ terra run void <run_id> --reason "…"     # cascade unlink preferred
 
 | Type | Meaning | Promote note |
 | ---- | ------- | ------------ |
-| number | quantity (n, mean, std) | med n≥3; high n≥5 + tight |
-| boolean | yes/no rate | med n≥3; high n≥5 unanimous |
+| number | quantity (n, mean, std) | med n≥3; high n≥5 + tight + 2 agreeing methods |
+| boolean | yes/no rate | med n≥3; high n≥5 unanimous + 2 agreeing methods |
 | formula | expr + vars → holds | med/high need holds + n |
 
 ```text
@@ -134,7 +140,7 @@ probes → runs → knowns/unknowns (number | boolean | formula)
 
 ```bash
 terra unknown create | link-probe | link-run | graduate | show | status | unlink-run | delete
-terra known get | depend | graph | tree | reaffirm | link-run | promote | show | unlink-run | delete
+terra known get | depend | graph | tree | tolerance | reaffirm | link-run | promote | show | unlink-run | delete
 terra gate       # mechanical debt check (all maps)
 terra plan create | link-run --leg | promote | show
 terra run list | show | void | delete

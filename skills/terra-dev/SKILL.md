@@ -195,7 +195,19 @@ deliverable tasks runs it (`--skip-gate "<reason>"` is recorded).
 cycles with ↺) — pure view over deps+staleness+consumers, no new state.
 Tests: `tests/test_readings_staleness_gate.py`, `tests/test_known_graph.py`.
 
-### 13. Budget vs plan vs actual vs sectors
+### 13. Corroboration: two evidence axes
+
+`stats.by_probe` (samples grouped by run probe_id) + `stats.corroboration`
+({methods, tolerance, spread, agree}) computed in `recompute_typed_node`,
+judged by `corroboration.py` against `record.tolerance` ("5%" rel | abs).
+Hard opinions: high needs ≥2 agreeing methods (single method caps at med;
+`derive_confidence_*` + `can_claim_confidence` enforce); `agree is False`
+collapses derived to low and blocks promote/get/gate (`--allow-disagree`
+escape on get). Tolerance: `--within` at unknown create (carried through
+graduate) or `terra known tolerance <id> --within X`. Formula type exempt.
+Tests: `tests/test_corroboration.py`.
+
+### 14. Budget vs plan vs actual vs sectors
 
 - `brief.budget_points` = authorized total (terra-brief).  
 - `route.sectors[]` = reserved provisions (`reserved_points`).  
