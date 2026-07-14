@@ -113,6 +113,11 @@ terra known promote est med   # blocks if n too small
 terra known show est          # n, mean, std + per-method stats
 ```
 
+Types: `number`, `boolean`, `formula` (expr+vars), and `relation` — F(x)
+curves measured by sweep runs, evaluated with `known get <id> --at <x>`
+(linear interp, no extrapolation; ladder counts sweeps). See
+[docs/relation-type.md](docs/relation-type.md).
+
 Two evidence axes ([docs/corroboration.md](docs/corroboration.md)):
 **repetition** (same probe, more runs → n-ladder) and **corroboration**
 (different probes agreeing within `--within 5%`). `high` needs ≥2 agreeing

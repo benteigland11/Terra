@@ -89,6 +89,21 @@ def validate_known_record(data: Any, *, expected_id: str | None = None) -> list[
             ok, msg = can_claim_confidence(stats, conf, map_type=mtype)
             if not ok:
                 blocks.append(msg)
+    elif mtype == "relation":
+        for field, what in (
+            ("quantity", "y measure name"),
+            ("x_quantity", "x meaning, e.g. alpha_deg"),
+        ):
+            v = data.get(field)
+            if not isinstance(v, str) or not v.strip():
+                blocks.append(f"type=relation requires {field} ({what})")
+        stats = data.get("stats")
+        if stats is not None and not isinstance(stats, dict):
+            blocks.append("stats must be an object when present")
+        elif isinstance(stats, dict) and conf in CONFIDENCE_SET:
+            ok, msg = can_claim_confidence(stats, conf, map_type="relation")
+            if not ok:
+                blocks.append(msg)
     elif mtype == "formula":
         blocks.extend(
             validate_formula_fields(data.get("expression"), data.get("vars"))
@@ -141,6 +156,8 @@ def create_known(
     probe_ids: list[str] | None = None,
     origin_unknown_id: str | None = None,
     tolerance: Any = None,
+    x_quantity: str | None = None,
+    x_unit: str = "",
 ) -> Path:
     if not _SLUG_RE.match(known_id):
         raise ValueError(f"known id {known_id!r} must match {_SLUG_RE.pattern}")
@@ -197,6 +214,10 @@ def create_known(
     else:
         if not quantity or not str(quantity).strip():
             raise ValueError(f"quantity is required for type={map_type}")
+        if map_type == "relation" and (
+            not x_quantity or not str(x_quantity).strip()
+        ):
+            raise ValueError("type=relation requires x_quantity")
         record = {
             "schema_version": KNOWN_SCHEMA_VERSION,
             "id": known_id,
@@ -210,6 +231,14 @@ def create_known(
             "run_ids": all_run_ids,
             "probe_ids": list(probe_ids or []),
             "primary_run_id": primary_run,
+            **(
+                {
+                    "x_quantity": str(x_quantity).strip(),
+                    "x_unit": (x_unit or "").strip(),
+                }
+                if map_type == "relation"
+                else {}
+            ),
             "stats": empty_stats(map_type),
             "confidence_derived": "low",
             "notes": notes or "",
@@ -278,11 +307,21 @@ def _check_mergeable(contributors: list[dict[str, Any]]) -> None:
                 f"but {first.get('id')!r} is type={mtype!r} — different "
                 "questions do not funnel into one known"
             )
-        if mtype in SCALAR_TYPES and unk.get("quantity") != first.get("quantity"):
+        if mtype in (*SCALAR_TYPES, "relation") and unk.get(
+            "quantity"
+        ) != first.get("quantity"):
             raise ValueError(
                 f"cannot merge: unknown {uid!r} measures "
                 f"{unk.get('quantity')!r} but {first.get('id')!r} measures "
                 f"{first.get('quantity')!r} — same known needs same quantity"
+            )
+        if mtype == "relation" and unk.get("x_quantity") != first.get(
+            "x_quantity"
+        ):
+            raise ValueError(
+                f"cannot merge: unknown {uid!r} has x_quantity="
+                f"{unk.get('x_quantity')!r} but {first.get('id')!r} has "
+                f"{first.get('x_quantity')!r}"
             )
         if mtype == "formula" and (
             unk.get("expression") != first.get("expression")
@@ -370,7 +409,9 @@ def graduate_unknown(
                 f"cannot merge into known {kid!r}: it is type="
                 f"{rec.get('type')!r}, unknowns are type={mtype!r}"
             )
-        if mtype in SCALAR_TYPES and rec.get("quantity") != first.get("quantity"):
+        if mtype in (*SCALAR_TYPES, "relation") and rec.get(
+            "quantity"
+        ) != first.get("quantity"):
             raise ValueError(
                 f"cannot merge into known {kid!r}: it measures "
                 f"{rec.get('quantity')!r}, unknowns measure "
@@ -420,6 +461,8 @@ def graduate_unknown(
             vars=first.get("vars"),
             origin_unknown_id=unknown_id,
             tolerance=tolerance,
+            x_quantity=first.get("x_quantity"),
+            x_unit=str(first.get("x_unit") or ""),
         )
         if len(ids) > 1:
             rec = load_known(project_root, kid)

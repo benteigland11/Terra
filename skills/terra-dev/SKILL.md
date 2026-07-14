@@ -227,14 +227,24 @@ refuse prose-only complete — `--freehand '<reason>'` is the recorded escape.
 `route_status().attention`: task_blocked, task_stalled (in_progress ≥7d,
 STALL_DAYS). Tests: `tests/test_route_evidence.py`.
 
-### 15. Probe loader bypasses the pyc cache
+### 15. Relation type: F(x) knowns
+
+`relation_type.py`: pairs from measures rows with `x`; stats per x-station
+(exact match — shared grid is the contract); `n` = sweeps (runs with pairs),
+not points. med ≥3 sweeps + ≥3 stations; high adds tight stations +
+corroboration at ≥2 SHARED stations (disjoint grids → agree=None).
+`evaluate_relation` = linear interp between station means, loud outside
+x_range. read_known(at=...) / `known get --at` / records need
+quantity + x_quantity. Tests: `tests/test_relation_type.py`.
+
+### 16. Probe loader bypasses the pyc cache
 
 `load_probe_module` compiles probe.py straight from source (no importlib
 SourceFileLoader): pyc validation is mtime+size, so a probe edited twice in
 the same second with equal file size silently ran STALE bytecode (surfaced
 by accept-spread tests). Never reintroduce spec_from_file_location there.
 
-### 16. Design layer: baseline + artifacts
+### 17. Design layer: baseline + artifacts
 
 `src/terra/design.py`, store `.terra/design.json` (project-wide, like
 brief/route; params sourced from GLOBAL map only via scoped_map). Admission
@@ -245,7 +255,7 @@ Artifacts stamp file sha256 + params_at; drift/regen detection in
 map_id="design". `design get` wraps read_known(min_conf=med) on global.
 Tests: `tests/test_design.py`.
 
-### 17. Budget vs plan vs actual vs sectors
+### 18. Budget vs plan vs actual vs sectors
 
 - `brief.budget_points` = authorized total (terra-brief).  
 - `route.sectors[]` = reserved provisions (`reserved_points`).  

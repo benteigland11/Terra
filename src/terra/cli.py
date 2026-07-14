@@ -883,6 +883,8 @@ def cmd_unknown_create(args: argparse.Namespace) -> int:
             expression=getattr(args, "expression", None),
             vars=getattr(args, "vars", None),
             tolerance=getattr(args, "within", None),
+            x_quantity=getattr(args, "x_quantity", None),
+            x_unit=getattr(args, "x_unit", "") or "",
         )
     except (ValueError, FileExistsError, OSError) as e:
         print(f"error: {e}", file=sys.stderr)
@@ -1014,6 +1016,12 @@ def _print_known_summary(prefix: str, rec: dict, path: Path | None = None) -> No
             f"  holds={st.get('holds')}  holds_rate={st.get('holds_rate')}  "
             f"n={st.get('n')}"
         )
+    elif rec.get("type") == "relation":
+        print(
+            f"  F({rec.get('x_quantity')}) → {rec.get('quantity')}  "
+            f"sweeps={st.get('n')}  stations={st.get('station_count')}  "
+            f"x_range={st.get('x_range')}"
+        )
     elif rec.get("type") == "boolean":
         print(
             f"  n={st.get('n')}  rate={st.get('rate')}  "
@@ -1138,6 +1146,20 @@ def cmd_known_show(args: argparse.Namespace) -> int:
         )
         if st.get("error"):
             print(f"error: {st.get('error')}")
+    elif rec.get("type") == "relation":
+        print(
+            f"F({rec.get('x_quantity')}{rec.get('x_unit') and ' ' + rec.get('x_unit') or ''}) "
+            f"→ {rec.get('quantity')}{rec.get('unit') and ' ' + rec.get('unit') or ''}"
+        )
+        print(
+            f"stats: sweeps={st.get('n')}  points={st.get('points')}  "
+            f"stations={st.get('station_count')}  x_range={st.get('x_range')}"
+        )
+        for stn in st.get("stations") or []:
+            print(
+                f"  x={stn.get('x')}  n={stn.get('n')}  "
+                f"mean={stn.get('mean')}  std={stn.get('std')}"
+            )
     else:
         print(f"quantity: {rec.get('quantity')}  unit={rec.get('unit') or '—'}")
         if rec.get("type") == "boolean":
@@ -1210,6 +1232,7 @@ def cmd_known_get(args: argparse.Namespace) -> int:
             allow_stale=bool(args.allow_stale),
             allow_disagree=bool(getattr(args, "allow_disagree", False)),
             consumer=args.consumer,
+            at=getattr(args, "at", None),
         )
     except (ValueError, FileNotFoundError, OSError) as e:
         print(f"error: {e}", file=sys.stderr)
@@ -2624,9 +2647,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_uc.add_argument(
         "--type",
         default=None,
-        choices=["number", "boolean", "formula"],
+        choices=["number", "boolean", "formula", "relation"],
         dest="type",
-        help="number | boolean | formula (observation as checkable expr+vars)",
+        help="number | boolean | formula (expr+vars) | relation (F(x) curve)",
+    )
+    p_uc.add_argument(
+        "--x-quantity",
+        dest="x_quantity",
+        default=None,
+        help="For relation: what x means (e.g. alpha_deg)",
+    )
+    p_uc.add_argument(
+        "--x-unit", dest="x_unit", default="", help="For relation: x unit"
     )
     p_uc.add_argument(
         "--quantity",
@@ -2880,6 +2912,13 @@ def build_parser() -> argparse.ArgumentParser:
         dest="allow_stale",
         action="store_true",
         help="Read even if a dependency moved (recorded, not recommended)",
+    )
+    p_kg.add_argument(
+        "--at",
+        type=float,
+        default=None,
+        help="For relation knowns: evaluate F(x) at this x (linear interp; "
+        "no extrapolation)",
     )
     p_kg.add_argument(
         "--allow-disagree",

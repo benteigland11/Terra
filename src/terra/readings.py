@@ -127,6 +127,8 @@ def extract_value(rec: dict[str, Any]) -> Any:
         return stats.get("rate")
     if mtype == "formula":
         return stats.get("holds")
+    if mtype == "relation":
+        return stats.get("stations")
     return None
 
 
@@ -139,6 +141,7 @@ def read_known(
     allow_disagree: bool = False,
     consumer: str | None = None,
     record: bool = True,
+    at: float | None = None,
 ) -> dict[str, Any]:
     """Read a known for consumption. Loud on missing/unbacked/stale/low-conf."""
     if min_conf not in CONFIDENCE_SET:
@@ -200,9 +203,23 @@ def read_known(
     if record:
         record_consumption(project_root, known_id, who)
 
+    value = extract_value(rec)
+    x_at = None
+    if at is not None:
+        if rec.get("type") != "relation":
+            raise ValueError(
+                f"--at only applies to relation knowns; {known_id} is "
+                f"type={rec.get('type')!r}"
+            )
+        from .relation_type import evaluate_relation
+
+        value = evaluate_relation(stats, float(at))
+        x_at = float(at)
+
     return {
         "id": known_id,
-        "value": extract_value(rec),
+        "value": value,
+        **({"at": x_at} if x_at is not None else {}),
         "unit": rec.get("unit") or "",
         "type": rec.get("type"),
         "confidence": conf,

@@ -64,6 +64,10 @@ terra unknown create <slug> --type formula \
   --expression "mean(h) <= 10 and n(h) >= 3" --var h=<quantity> \
   --claim "…?" --evidence "…"
 
+terra unknown create <slug> --type relation --quantity <y> \
+  --x-quantity <x> --claim "F(x)?" --evidence "…" [--within 10%]
+# probes emit {"quantity","x","value"} pairs; one sweep run = many points
+
 terra unknown create <slug> --claim "…" --evidence "…"   # untyped OK
 ```
 
@@ -156,6 +160,7 @@ terra run void <run_id> --reason "…"     # cascade unlink preferred
 | number | quantity (n, mean, std) | med n≥3; high n≥5 + tight + 2 agreeing methods |
 | boolean | yes/no rate | med n≥3; high n≥5 unanimous + 2 agreeing methods |
 | formula | expr + vars → holds | med/high need holds + n |
+| relation | F(x) curve, per-x stations | n = SWEEPS: med ≥3 sweeps + ≥3 stations; high +2 agreeing methods at shared stations. Read: `known get <id> --at <x>` (interp, no extrapolation) |
 
 ```text
 probes → runs → knowns/unknowns (number | boolean | formula)

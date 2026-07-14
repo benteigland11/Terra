@@ -58,6 +58,8 @@ def create_unknown(
     expression: str | None = None,
     vars: dict[str, Any] | list[str] | str | None = None,
     tolerance: Any = None,
+    x_quantity: str | None = None,
+    x_unit: str = "",
 ) -> Path:
     if not _SLUG_RE.match(unknown_id):
         raise ValueError(
@@ -79,6 +81,14 @@ def create_unknown(
         not quantity or not str(quantity).strip()
     ):
         raise ValueError(f"type={map_type} requires --quantity")
+    if map_type == "relation":
+        if not quantity or not str(quantity).strip():
+            raise ValueError("type=relation requires --quantity (the y measure)")
+        if not x_quantity or not str(x_quantity).strip():
+            raise ValueError(
+                "type=relation requires --x-quantity (what x means, "
+                "e.g. alpha_deg)"
+            )
     if map_type == "formula":
         vars_spec = parse_vars_arg(vars)
         expr = (expression or "").strip()
@@ -115,17 +125,26 @@ def create_unknown(
         record["unit"] = (unit or "").strip()
         record["stats"] = empty_stats(map_type)
         record["confidence_derived"] = "low"
-        if tolerance is not None:
-            from .corroboration import parse_tolerance
-
-            parse_tolerance(tolerance)  # loud on junk
-            record["tolerance"] = tolerance
+    elif map_type == "relation":
+        record["type"] = "relation"
+        record["quantity"] = quantity.strip()
+        record["unit"] = (unit or "").strip()
+        record["x_quantity"] = str(x_quantity).strip()
+        record["x_unit"] = (x_unit or "").strip()
+        record["stats"] = empty_stats("relation")
+        record["confidence_derived"] = "low"
     elif map_type == "formula":
         record["type"] = "formula"
         record["expression"] = expr
         record["vars"] = vars_spec
         record["stats"] = empty_formula_stats()
         record["confidence_derived"] = "low"
+    if map_type in SCALAR_TYPES or map_type == "relation":
+        if tolerance is not None:
+            from .corroboration import parse_tolerance
+
+            parse_tolerance(tolerance)  # loud on junk
+            record["tolerance"] = tolerance
     blocks = validate_unknown_record(record, expected_id=unknown_id)
     if blocks:
         raise ValueError("invalid unknown:\n  - " + "\n  - ".join(blocks))

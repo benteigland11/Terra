@@ -207,6 +207,14 @@ Beliefs → **terra-survey**. Scopes → **terra-scopes**. Route → **terra-rou
 6. Eng packages: probe covers the current claim family.
 
 Stopping at scaffold, validate-only, or “ran the tool outside Terra” = incomplete.
+## Sweep probes (relation knowns)
+
+For `--type relation` knowns, emit (x, y) pairs as measures with an `x`
+field — `{'quantity': 'cl', 'x': 4.0, 'value': 0.62}` — many per run (one
+run = one sweep). Keep a **shared x grid** across sweeps and across methods:
+stations match on exact x, and corroboration only judges shared stations.
+Repeat the sweep for the ladder (n = sweeps, not points).
+
 ## Probes are methods (corroboration)
 
 A second *independent* probe for the same quantity is how a known reaches

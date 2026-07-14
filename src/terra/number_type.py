@@ -15,7 +15,8 @@ from typing import Any
 # Plans are a higher layer (see evidence_plan / plans), not a peer type.
 # number/boolean: estimates; formula: observation as checkable predicate + vars
 SCALAR_TYPES = frozenset({"number", "boolean"})
-MAP_TYPES = frozenset({"number", "boolean", "formula"})
+# relation: F(x) curves — samples are (x, y) pairs, ladder unit is sweeps
+MAP_TYPES = frozenset({"number", "boolean", "formula", "relation"})
 CONFIDENCE_LEVELS = ("low", "med", "high")
 CONFIDENCE_SET = frozenset(CONFIDENCE_LEVELS)
 
@@ -175,6 +176,10 @@ def derive_confidence(stats: dict[str, Any], map_type: str | None = None) -> str
         from .formula_type import derive_confidence_formula
 
         return derive_confidence_formula(stats)
+    if kind == "relation":
+        from .relation_type import derive_confidence_relation
+
+        return derive_confidence_relation(stats)
     return derive_confidence_number(stats)
 
 
@@ -220,6 +225,14 @@ def can_claim_confidence(
             False,
             f"cannot claim confidence={want!r} with n={stats.get('n')}, "
             f"rate={stats.get('rate')} (derived max is {derived!r}; need more trials)",
+        )
+    if kind == "relation":
+        return (
+            False,
+            f"cannot claim confidence={want!r} with sweeps={stats.get('n')}, "
+            f"stations={stats.get('station_count')} (derived max is "
+            f"{derived!r}; med needs >=3 sweeps and >=3 stations — repeat "
+            f"the sweep, don't just densify it)",
         )
     return (
         False,
@@ -367,6 +380,10 @@ def empty_stats(map_type: str = "number") -> dict[str, Any]:
         from .formula_type import empty_formula_stats
 
         return empty_formula_stats()
+    if map_type == "relation":
+        from .relation_type import empty_relation_stats
+
+        return empty_relation_stats()
     return compute_number_stats([])
 
 
@@ -420,9 +437,14 @@ def recompute_typed_node(
                 }
             )
             continue
-        vals = extract_measures_from_run_dir(
-            rdir, meta, quantity=quantity, map_type=map_type
-        )
+        if map_type == "relation":
+            from .relation_type import extract_relation_pairs_from_run_meta
+
+            vals = extract_relation_pairs_from_run_meta(meta, quantity=quantity)
+        else:
+            vals = extract_measures_from_run_dir(
+                rdir, meta, quantity=quantity, map_type=map_type
+            )
         pid = meta.get("probe_id") or "unknown_probe"
         sample_runs.append(
             {"run_id": rid, "probe_id": pid, "n": len(vals), "values": vals}
@@ -430,7 +452,27 @@ def recompute_typed_node(
         values_by_probe.setdefault(pid, []).extend(vals)
         all_values.extend(vals)
 
-    if map_type == "boolean":
+    if map_type == "relation":
+        from .relation_type import compute_relation_stats
+
+        def _sweeps(rows):
+            return sum(1 for r in rows if (r.get("n") or 0) > 0)
+
+        stats = compute_relation_stats(
+            all_values, sweeps=_sweeps(sample_runs)
+        )
+        by_probe = {
+            pid: compute_relation_stats(
+                vals,
+                sweeps=sum(
+                    1
+                    for r in sample_runs
+                    if r.get("probe_id") == pid and (r.get("n") or 0) > 0
+                ),
+            )
+            for pid, vals in values_by_probe.items()
+        }
+    elif map_type == "boolean":
         stats = compute_boolean_stats([v for v in all_values if isinstance(v, bool)])
         by_probe = {
             pid: compute_boolean_stats([v for v in vals if isinstance(v, bool)])
@@ -462,9 +504,16 @@ def recompute_typed_node(
         g.pop("by_run", None)
         g.pop("values", None)
     stats["by_probe"] = by_probe
-    corr = compute_corroboration(
-        by_probe, map_type=map_type, tolerance=record.get("tolerance")
-    )
+    if map_type == "relation":
+        from .relation_type import relation_corroboration
+
+        corr = relation_corroboration(
+            by_probe, tolerance=record.get("tolerance")
+        )
+    else:
+        corr = compute_corroboration(
+            by_probe, map_type=map_type, tolerance=record.get("tolerance")
+        )
     from .corroboration import method_band, reconcile_accepted_spread
 
     band = method_band(by_probe)
