@@ -191,7 +191,9 @@ on link-run / reaffirm / depend. `terra gate` exits 1 on blocking unknowns,
 stale/unbacked knowns, incomplete plans across ALL maps; `route complete` on
 deliverable tasks runs it (`--skip-gate "<reason>"` is recorded).
 `run_probe` sets consumer `probe:<id>` via `readings.consumer_scope`.
-Tests: `tests/test_readings_staleness_gate.py`.
+`terra known graph|tree` renders the chain (shared subtrees collapse with …,
+cycles with ↺) — pure view over deps+staleness+consumers, no new state.
+Tests: `tests/test_readings_staleness_gate.py`, `tests/test_known_graph.py`.
 
 ### 13. Budget vs plan vs actual vs sectors
 

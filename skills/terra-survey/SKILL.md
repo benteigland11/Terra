@@ -90,6 +90,8 @@ terra known promote <slug> med           # blocks if ladder / !holds
 ```bash
 terra known get <slug> [--raw] [--min-conf med]   # THE number; loud if stale/unbacked
 terra known depend <slug> --on known:<up> --on file:<relpath>
+terra known graph --human                         # whole chain: which upstream moved
+terra known tree <slug> --human                   # one node up/down + consumers
 terra known reaffirm <slug> --reason "…"          # verified-unchanged only
 terra gate                                        # exit 1 while debt remains
 ```
@@ -132,7 +134,7 @@ probes → runs → knowns/unknowns (number | boolean | formula)
 
 ```bash
 terra unknown create | link-probe | link-run | graduate | show | status | unlink-run | delete
-terra known get | depend | reaffirm | link-run | promote | show | unlink-run | delete
+terra known get | depend | graph | tree | reaffirm | link-run | promote | show | unlink-run | delete
 terra gate       # mechanical debt check (all maps)
 terra plan create | link-run --leg | promote | show
 terra run list | show | void | delete

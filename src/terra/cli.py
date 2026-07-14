@@ -1218,6 +1218,38 @@ def cmd_known_reaffirm(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_known_graph(args: argparse.Namespace) -> int:
+    """Whole-map dependency graph — which upstream moved, in one look."""
+    from .agent_io import emit, error, success
+    from .known_graph import build_graph, render_graph_text
+
+    try:
+        root = require_project_root()
+        graph = build_graph(root)
+    except (ValueError, FileNotFoundError, OSError) as e:
+        return emit(error(str(e), code="known_graph"))
+    if getattr(args, "human", False):
+        print(render_graph_text(graph))
+        return 0
+    return emit(success(graph, meta={"surface": "terra.known.graph"}))
+
+
+def cmd_known_tree(args: argparse.Namespace) -> int:
+    """One known: upstream chain + downstream fan + consumers."""
+    from .agent_io import emit, error, success
+    from .known_graph import build_graph, build_tree, render_tree_text
+
+    try:
+        root = require_project_root()
+        tree = build_tree(build_graph(root), args.id)
+    except (ValueError, FileNotFoundError, OSError) as e:
+        return emit(error(str(e), code="known_tree"))
+    if getattr(args, "human", False):
+        print(render_tree_text(tree))
+        return 0
+    return emit(success(tree, meta={"surface": "terra.known.tree"}))
+
+
 def cmd_gate(args: argparse.Namespace) -> int:
     """Mechanical gate: exit 0 clean, exit 1 with violations. CI-able."""
     from .agent_io import emit, error, success
@@ -2634,6 +2666,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Dependency spec (repeatable)",
     )
     p_kd.set_defaults(func=cmd_known_depend)
+
+    p_kgr = kn_sub.add_parser(
+        "graph",
+        help="Dependency graph for this map: files → knowns → knowns, "
+        "stale + consumers inline",
+    )
+    p_kgr.add_argument("--human", action="store_true", help="Tree text output")
+    p_kgr.set_defaults(func=cmd_known_graph)
+
+    p_ktr = kn_sub.add_parser(
+        "tree",
+        help="One known: upstream chain, downstream dependents, consumers",
+    )
+    p_ktr.add_argument("id")
+    p_ktr.add_argument("--human", action="store_true", help="Text output")
+    p_ktr.set_defaults(func=cmd_known_tree)
 
     p_kra = kn_sub.add_parser(
         "reaffirm",

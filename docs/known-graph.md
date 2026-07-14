@@ -59,7 +59,28 @@ terra known reaffirm cg_pos --reason "reloft doesn't move CG"  # verified unchan
 
 Both refresh the dep stamps; reaffirm keeps a trail in `record.reaffirmed`.
 
-## 3. Gate (`terra gate`)
+## 3. Reading the chain (`terra known graph` / `tree`)
+
+```bash
+terra known graph --human     # whole map: files → knowns → knowns
+terra known tree mission_ok --human   # one node: upstream / downstream / consumers
+```
+
+```text
+KNOWN GRAPH  map=global  (3 knowns, 1 files, 3 edges, 2 stale)
+file:airframe.stl  CHANGED
+└─ cg_pos  [number n=1 low]  STALE: file dep changed: airframe.stl
+   └─ mission_ok  [number n=1 low]  STALE: upstream stale: known:cg_pos
+      ← consumers: tool:mission_card.py
+mtow  [number n=1 low]
+└─ cg_pos  …            # shared subtree collapsed after first print
+```
+
+"which single upstream moved?" is the first line. Default output is the agent
+JSON envelope (nodes/edges/roots/isolated/counts); cycles render with ↺.
+Knowns with no edges list under "unwired".
+
+## 4. Gate (`terra gate`)
 
 Mechanical, CI-able: exit 0 iff clean, exit 1 with the violation list.
 Default scans **every map** — session debt cannot hide.
