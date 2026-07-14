@@ -207,7 +207,17 @@ escape on get). Tolerance: `--within` at unknown create (carried through
 graduate) or `terra known tolerance <id> --within X`. Formula type exempt.
 Tests: `tests/test_corroboration.py`.
 
-### 14. Budget vs plan vs actual vs sectors
+### 14. Route hardening: evidence refs, cycles, aging
+
+`complete_task` validates `--run`/`--known` refs across ALL maps
+(`validate_evidence_refs`: run exists + not voided; known backed + methods
+not disagreeing). SURVEY_SKILLS = {terra-map, terra-probe} (or role=survey)
+refuse prose-only complete — `--freehand '<reason>'` is the recorded escape.
+`validate_route` rejects dep cycles (load + save, so hand-edited files too).
+`route_status().attention`: task_blocked, task_stalled (in_progress ≥7d,
+STALL_DAYS). Tests: `tests/test_route_evidence.py`.
+
+### 15. Budget vs plan vs actual vs sectors
 
 - `brief.budget_points` = authorized total (terra-brief).  
 - `route.sectors[]` = reserved provisions (`reserved_points`).  

@@ -97,7 +97,8 @@ terra route add bricks --title "Extract widgets" --skill cg-plan --dep survey_ae
   --bucket low
 terra route next
 terra route start survey_aero
-terra route complete survey_aero --evidence "map status clean"
+terra route complete survey_aero --run <run_id>   # claim-shaped: cite the map
+terra route complete wire_glue --evidence "wired"  # non-claim tasks: prose OK
 terra route budget
 terra route lock-plan
 terra route status
@@ -114,7 +115,9 @@ Store: `.terra/route.json`.
 1. `terra brief show` — still the mission?  
 2. `terra route next` — what is pickable?  
 3. Spawn subagent with task + skill + acceptance.  
-4. `terra route complete|block` with evidence.  
+4. `terra route complete|block` with evidence — claim-shaped tasks
+   (terra-map/terra-probe/survey) must cite `--run`/`--known` refs
+   (validated: not voided, backed, methods agree) or record `--freehand`.  
 5. **`terra route add`** when new work appears (skeleton routes are not closed).  
 6. `terra map status` when the task was survey-shaped.  
 

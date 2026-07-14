@@ -146,3 +146,24 @@ override:
 ```bash
 terra route complete ship --skip-gate "reason"   # override lands in task evidence
 ```
+
+## Claim-shaped tasks need evidence refs
+
+`route complete` on a task with skill `terra-map`/`terra-probe` (or role
+`survey`) refuses prose-only completion. Cite the map:
+
+```bash
+terra route complete survey --run <run_id> [--run …] [--known <known_id>]
+terra route complete survey --freehand "why no instrument applies"  # recorded
+```
+
+Refs are validated: runs must exist and not be voided; knowns must be backed
+and their methods must not disagree. Evidence entries carry structured
+`runs`/`knowns` lists, not just prose.
+
+## Route hygiene
+
+- Dep cycles are rejected at add/save time (`dependency cycle: a -> b -> a`) —
+  a cycle would silently make tasks never-pickable.
+- `route status` carries `attention`: `task_blocked` (with reason) and
+  `task_stalled` (in_progress untouched ≥7 days — complete/block or split).

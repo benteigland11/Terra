@@ -207,6 +207,31 @@ def validate_route(data: Any) -> list[str]:
         for d in t.get("deps") or []:
             if d not in ids:
                 blocks.append(f"task {t.get('id')}: unknown dep {d!r}")
+    # dep acyclicity — a cycle silently makes tasks never-pickable
+    dep_map = {
+        t.get("id"): [d for d in (t.get("deps") or []) if d in ids]
+        for t in tasks
+        if isinstance(t, dict) and t.get("id") in ids
+    }
+    WHITE, GRAY, BLACK = 0, 1, 2
+    color = {tid: WHITE for tid in dep_map}
+    cycles: list[str] = []
+
+    def visit(tid: str, path: list[str]) -> None:
+        color[tid] = GRAY
+        for d in dep_map.get(tid) or []:
+            if color.get(d) == GRAY:
+                cyc = path[path.index(d):] + [d] if d in path else [tid, d]
+                cycles.append(" -> ".join(cyc + [cyc[0]] if cyc[-1] != cyc[0] else cyc))
+            elif color.get(d) == WHITE:
+                visit(d, path + [d])
+        color[tid] = BLACK
+
+    for tid in dep_map:
+        if color[tid] == WHITE:
+            visit(tid, [tid])
+    for cyc in sorted(set(cycles)):
+        blocks.append(f"dependency cycle: {cyc}")
     return blocks
 
 
@@ -506,24 +531,139 @@ def start_task(project_root: Path, task_id: str) -> dict[str, Any]:
     return _get_task(load_route(project_root), task_id)
 
 
+# Claim-shaped skills: completing these must cite map evidence, not prose
+SURVEY_SKILLS = frozenset({"terra-map", "terra-probe"})
+
+
+def _all_map_ids(project_root: Path) -> list[str]:
+    from .paths import list_maps
+
+    return [m["id"] for m in list_maps(project_root)] or ["global"]
+
+
+def _find_run(project_root: Path, run_id: str) -> dict[str, Any] | None:
+    """Search every map for a run id (run ids are globally unique)."""
+    from .paths import run_dir, scoped_map
+    from .probe_run import RUN_META_NAME
+
+    for mid in _all_map_ids(project_root):
+        with scoped_map(mid):
+            meta_path = run_dir(project_root, run_id) / RUN_META_NAME
+            if meta_path.is_file():
+                try:
+                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, OSError):
+                    continue
+                meta["_map_id"] = mid
+                return meta
+    return None
+
+
+def _find_known(project_root: Path, known_id: str) -> dict[str, Any] | None:
+    """Search active map first, then the rest."""
+    from .paths import get_active_map_id, known_path, scoped_map
+
+    active = get_active_map_id(project_root)
+    order = [active] + [m for m in _all_map_ids(project_root) if m != active]
+    for mid in order:
+        with scoped_map(mid):
+            path = known_path(project_root, known_id)
+            if path.is_file():
+                try:
+                    rec = json.loads(path.read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, OSError):
+                    continue
+                rec["_map_id"] = mid
+                return rec
+    return None
+
+
+def validate_evidence_refs(
+    project_root: Path,
+    *,
+    run_ids: list[str] | None = None,
+    known_ids: list[str] | None = None,
+) -> list[str]:
+    """Hard checks: cited evidence must exist and be trustworthy."""
+    problems: list[str] = []
+    for rid in run_ids or []:
+        meta = _find_run(project_root, rid)
+        if meta is None:
+            problems.append(f"run not found on any map: {rid}")
+        elif meta.get("voided"):
+            problems.append(
+                f"run {rid} is voided ({meta.get('void_reason')!r}) — "
+                f"voided evidence cannot complete a task"
+            )
+    for kid in known_ids or []:
+        rec = _find_known(project_root, kid)
+        if rec is None:
+            problems.append(f"known not found on any map: {kid}")
+            continue
+        stats = rec.get("stats") or {}
+        if not (rec.get("run_ids") or []) or not (stats.get("n") or 0):
+            problems.append(f"known {kid} is unbacked (n=0) — not evidence")
+        if (stats.get("corroboration") or {}).get("agree") is False:
+            problems.append(
+                f"known {kid}: methods disagree — resolve before citing it"
+            )
+    return problems
+
+
 def complete_task(
     project_root: Path,
     task_id: str,
     *,
     evidence: str | None = None,
+    run_ids: list[str] | None = None,
+    known_ids: list[str] | None = None,
+    freehand: str | None = None,
 ) -> dict[str, Any]:
     rec = load_route(project_root)
-    _get_task(rec, task_id)
-    for task in rec["tasks"]:
-        if task.get("id") == task_id:
-            task["status"] = "done"
-            task["updated_at"] = _now()
-            task["blocked_reason"] = None
-            task.pop("waiting_on", None)
+    task = _get_task(rec, task_id)
+
+    problems = validate_evidence_refs(
+        project_root, run_ids=run_ids, known_ids=known_ids
+    )
+    if problems:
+        raise ValueError(
+            "evidence refs rejected:\n  - " + "\n  - ".join(problems)
+        )
+
+    claim_shaped = (
+        task.get("skill") in SURVEY_SKILLS or task.get("role") == "survey"
+    )
+    if claim_shaped and not run_ids and not known_ids:
+        if not freehand:
+            raise ValueError(
+                f"task {task_id} is claim-shaped (skill="
+                f"{task.get('skill')!r}, role={task.get('role')!r}) — "
+                "completing it needs map evidence, not prose:\n"
+                "    terra route complete "
+                f"{task_id} --run <run_id> | --known <known_id>\n"
+                "  or record why none applies:\n"
+                f"    terra route complete {task_id} --freehand '<reason>'"
+            )
+
+    for t in rec["tasks"]:
+        if t.get("id") == task_id:
+            t["status"] = "done"
+            t["updated_at"] = _now()
+            t["blocked_reason"] = None
+            t.pop("waiting_on", None)
+            entry: dict[str, Any] = {"at": _now()}
             if evidence:
-                ev = list(task.get("evidence") or [])
-                ev.append({"at": _now(), "note": evidence.strip()})
-                task["evidence"] = ev
+                entry["note"] = evidence.strip()
+            if run_ids:
+                entry["runs"] = list(run_ids)
+            if known_ids:
+                entry["knowns"] = list(known_ids)
+            if freehand:
+                entry["freehand"] = freehand.strip()
+            if len(entry) > 1:
+                ev = list(t.get("evidence") or [])
+                ev.append(entry)
+                t["evidence"] = ev
     save_route(project_root, rec)
     return _get_task(load_route(project_root), task_id)
 
@@ -934,6 +1074,50 @@ def budget_rollup(project_root: Path, tasks: list[dict[str, Any]]) -> dict[str, 
     }
 
 
+STALL_DAYS = 7
+
+
+def route_attention(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Aging debt on the route: stalled in-progress work, standing blocks."""
+    from datetime import datetime, timezone
+
+    items: list[dict[str, Any]] = []
+    now = datetime.now(timezone.utc)
+    for t in tasks:
+        st = t.get("status")
+        if st == "blocked":
+            items.append(
+                {
+                    "kind": "task_blocked",
+                    "id": t.get("id"),
+                    "severity": "med",
+                    "why": f"blocked: {t.get('blocked_reason') or '(no reason)'}",
+                }
+            )
+        elif st == "in_progress":
+            raw = t.get("updated_at")
+            try:
+                touched = datetime.fromisoformat(
+                    str(raw).replace("Z", "+00:00")
+                )
+                age_days = (now - touched).days
+            except (ValueError, TypeError):
+                continue
+            if age_days >= STALL_DAYS:
+                items.append(
+                    {
+                        "kind": "task_stalled",
+                        "id": t.get("id"),
+                        "severity": "high",
+                        "why": (
+                            f"in_progress untouched for {age_days}d — "
+                            f"complete/block it or split the work"
+                        ),
+                    }
+                )
+    return items
+
+
 def route_status(project_root: Path) -> dict[str, Any]:
     rec = load_route(project_root)
     rec["tasks"] = _recompute_ready(list(rec.get("tasks") or []))
@@ -960,5 +1144,6 @@ def route_status(project_root: Path) -> dict[str, Any]:
         "budget": budget_rollup(project_root, tasks),
         "next": next_tasks(project_root, limit=5),
         "blocked": blocked,
+        "attention": route_attention(tasks),
         "tasks": tasks,
     }

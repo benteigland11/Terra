@@ -426,6 +426,8 @@ def cmd_route_status(args: argparse.Namespace) -> int:
               f"done={c.get('done')}")
         b = st.get("budget") or {}
         _print_budget_human(b)
+        for a in st.get("attention") or []:
+            print(f"  ! [{a.get('kind')}] {a.get('id')}: {a.get('why')}")
         print("next:")
         for t in st.get("next") or []:
             pts = t.get("points")
@@ -747,7 +749,14 @@ def cmd_route_complete(args: argparse.Namespace) -> int:
                 f"{gate_meta['gate_overridden']}"
             )
             ev = f"{ev} | {note}" if ev else note
-        t = complete_task(root, args.id, evidence=ev)
+        t = complete_task(
+            root,
+            args.id,
+            evidence=ev,
+            run_ids=getattr(args, "run_refs", None),
+            known_ids=getattr(args, "known_refs", None),
+            freehand=getattr(args, "freehand", None),
+        )
     except (FileNotFoundError, ValueError, OSError) as e:
         return emit(error(str(e), code="route_complete"))
     return emit(success(t, meta={"surface": "terra.route.complete", **gate_meta}))
@@ -3172,9 +3181,33 @@ def build_parser() -> argparse.ArgumentParser:
     p_rstt.add_argument("id")
     p_rstt.set_defaults(func=cmd_route_start)
 
-    p_rc = rt_sub.add_parser("complete", help="Mark task done")
+    p_rc = rt_sub.add_parser(
+        "complete",
+        help="Mark task done (claim-shaped tasks need --run/--known refs)",
+    )
     p_rc.add_argument("id")
-    p_rc.add_argument("--evidence", default=None)
+    p_rc.add_argument("--evidence", default=None, help="Prose note (optional)")
+    p_rc.add_argument(
+        "--run",
+        action="append",
+        dest="run_refs",
+        default=None,
+        metavar="RUN_ID",
+        help="Cite a stamped run (validated: exists, not voided; repeatable)",
+    )
+    p_rc.add_argument(
+        "--known",
+        action="append",
+        dest="known_refs",
+        default=None,
+        metavar="KNOWN_ID",
+        help="Cite a known (validated: backed, methods not disagreeing; repeatable)",
+    )
+    p_rc.add_argument(
+        "--freehand",
+        default=None,
+        help="Complete a claim-shaped task without map evidence (reason recorded)",
+    )
     p_rc.add_argument(
         "--skip-gate",
         dest="skip_gate",

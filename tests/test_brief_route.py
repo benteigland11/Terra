@@ -76,7 +76,15 @@ def test_route_deps_and_next(tmp_path: Path, monkeypatch):
         start_task(tmp_path, "build_widget")
 
     start_task(tmp_path, "survey_aero")
-    complete_task(tmp_path, "survey_aero", evidence="map status clean")
+    # claim-shaped (terra-map) task refuses prose-only completion
+    with pytest.raises(ValueError, match="needs map evidence"):
+        complete_task(tmp_path, "survey_aero", evidence="map status clean")
+    complete_task(
+        tmp_path,
+        "survey_aero",
+        evidence="map status clean",
+        freehand="demo route, no survey ran",
+    )
     nxt2 = next_tasks(tmp_path)
     assert any(t["id"] == "build_widget" for t in nxt2)
 
