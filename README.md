@@ -116,6 +116,21 @@ terra known show est          # n, mean, std
 `terra known create` is retired; a known whose evidence is later voided away
 shows up in `map status` attention as `known_unbacked`.
 
+**Consume knowns, never copy them** — read path + deps + gate
+(see [docs/known-graph.md](docs/known-graph.md)):
+
+```bash
+terra known get mtow --raw            # single home of the number (loud if stale)
+terra known depend cg_pos --on file:airframe.stl --on known:mtow
+terra known reaffirm cg_pos --reason "…"   # verified unchanged
+terra gate                            # exit 1 on blocking unknowns / stale / unbacked
+```
+
+```python
+from terra.readings import known      # in probes/tools
+MTOW = known("mtow")["value"]
+```
+
 **Suites** (ordered recipes, shared `to` — not domain plugins):
 
 ```bash

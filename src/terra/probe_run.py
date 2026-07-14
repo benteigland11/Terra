@@ -237,8 +237,12 @@ def run_probe(
     started = _now()
     started_mono = datetime.now(timezone.utc)
     # Keep map lib on sys.path for the whole execute (imports inside run())
+    from .readings import consumer_scope
+
     try:
-        with probe_sys_path(project_root, pdir):
+        with probe_sys_path(project_root, pdir), consumer_scope(
+            f"probe:{probe_id}"
+        ):
             raw = _call_with_timeout(fn, ctx, timeout_eff)
     except FuturesTimeout as e:
         raise TimeoutError(

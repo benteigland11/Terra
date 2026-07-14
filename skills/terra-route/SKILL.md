@@ -135,3 +135,14 @@ Give: task id, `skill`, acceptance from route, “read `terra brief show` first.
 Pickable work is done or honestly blocked; claim tasks have map-linked evidence; new work was `route add`ed, not only chatted.
 
 *Brief fields: **terra-brief**. Readings: **terra-survey**. Instruments: **terra-probe**.*
+
+## Deliverable tasks run the gate
+
+`terra route complete` on a task with skill/role `deliverable` runs
+`terra gate` (all maps). Blocking unknowns, stale/unbacked knowns, or
+incomplete plans **refuse the complete**. Fix the debt, or record an explicit
+override:
+
+```bash
+terra route complete ship --skip-gate "reason"   # override lands in task evidence
+```

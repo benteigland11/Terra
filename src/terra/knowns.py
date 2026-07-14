@@ -375,6 +375,11 @@ def link_run_known(
     rec["run_ids"] = rids
     if primary or rec.get("primary_run_id") is None:
         rec["primary_run_id"] = run_id
+    if rec.get("deps"):
+        # New evidence = honest re-derivation → refresh dep freshness stamps
+        from .staleness import stamp_deps
+
+        stamp_deps(project_root, rec)
     save_known(project_root, rec)
     return load_known(project_root, known_id)
 
@@ -425,6 +430,55 @@ def promote_known(
         rec["status"] = status
     elif confidence in ("med", "high") and rec.get("status") == "provisional":
         rec["status"] = "active"
+    save_known(project_root, rec)
+    return load_known(project_root, known_id)
+
+
+def add_dependency(
+    project_root: Path, known_id: str, dep_specs: list[str]
+) -> dict[str, Any]:
+    """Declare deps: ``known:<id>`` / ``file:<relpath>``. Stamps freshness now."""
+    from .staleness import DEP_KIND_KNOWN, parse_dep, stamp_deps
+
+    rec = load_known(project_root, known_id)
+    deps = rec.setdefault("deps", {})
+    for spec in dep_specs:
+        kind, target = parse_dep(spec)
+        if kind == DEP_KIND_KNOWN:
+            if target == known_id:
+                raise ValueError(f"known {known_id} cannot depend on itself")
+            if not (knowns_root(project_root) / f"{target}.json").is_file():
+                raise FileNotFoundError(f"known dep not found: {target}")
+            rows = deps.setdefault("knowns", [])
+            if not any(r.get("id") == target for r in rows):
+                rows.append({"id": target, "as_of": None})
+        else:
+            if not (project_root / target).is_file():
+                raise FileNotFoundError(
+                    f"file dep not found: {target} (path is relative to "
+                    f"project root)"
+                )
+            rows = deps.setdefault("files", [])
+            if not any(r.get("path") == target for r in rows):
+                rows.append({"path": target, "sha256": None, "linked_at": _now()})
+    stamp_deps(project_root, rec)
+    save_known(project_root, rec)
+    return load_known(project_root, known_id)
+
+
+def reaffirm_known(
+    project_root: Path, known_id: str, *, reason: str
+) -> dict[str, Any]:
+    """Verified-unchanged escape hatch: re-stamp deps, keep the trail."""
+    from .staleness import stamp_deps
+
+    if not reason or not str(reason).strip():
+        raise ValueError("reaffirm requires --reason (no silent freshness)")
+    rec = load_known(project_root, known_id)
+    stamp_deps(project_root, rec)
+    log = list(rec.get("reaffirmed") or [])
+    log.append({"at": _now(), "reason": reason.strip()})
+    rec["reaffirmed"] = log
     save_known(project_root, rec)
     return load_known(project_root, known_id)
 

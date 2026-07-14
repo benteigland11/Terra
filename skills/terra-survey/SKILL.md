@@ -2,7 +2,8 @@
 name: terra-survey
 description: >
   REQUIRED for Terra map beliefs and evidence: unknown create/link/resolve,
-  unknown graduate (known birth), known link/promote, plan create/link/promote, run void/list, typed
+  unknown graduate (known birth), known get/depend/reaffirm/link/promote, gate,
+  plan create/link/promote, run void/list, typed
   number|boolean|formula, claim-shaped analysis without freehand, n-ladder /
   promote rules. Fire on fog, "open an unknown", encode a known, formula gate,
   multi-leg plan, void bad run, "looks good after one sample", or asserting
@@ -25,7 +26,13 @@ Instruments: **terra-probe**. Program tasks: **terra-route**.
 5. Bare `python tools/…` is not evidence — `terra probe run`.  
 6. Resolve unknowns only with linked runs.
 7. Knowns are born only via `unknown graduate` — no run, no known.  
-8. Prefer `terra map status` over chat memory.
+8. Consume knowns, never copy them: `terra known get` / `readings.known()` —
+   a number hardcoded in a tool/sheet is drift waiting to happen.  
+9. Declare deps (`known depend --on known:x --on file:y`); stale knowns must be
+   re-derived (link-run) or `reaffirm`ed with a reason — never consumed silently.  
+10. `terra gate` is the debt collector: blocking unknowns, stale/unbacked
+   knowns, incomplete plans mechanically fail it (deliverable route tasks run it).  
+11. Prefer `terra map status` over chat memory.
 
 ## Survey loop
 
@@ -78,6 +85,20 @@ terra known link-run <slug> <run_id2>
 terra known promote <slug> med           # blocks if ladder / !holds
 ```
 
+### 4b. Consume + wire the graph
+
+```bash
+terra known get <slug> [--raw] [--min-conf med]   # THE number; loud if stale/unbacked
+terra known depend <slug> --on known:<up> --on file:<relpath>
+terra known reaffirm <slug> --reason "…"          # verified-unchanged only
+terra gate                                        # exit 1 while debt remains
+```
+
+```python
+from terra.readings import known    # in probes/tools — never hardcode a copy
+mtow = known("mtow")["value"]
+```
+
 ### 5. Multi-leg → plan
 
 ```bash
@@ -111,7 +132,8 @@ probes → runs → knowns/unknowns (number | boolean | formula)
 
 ```bash
 terra unknown create | link-probe | link-run | graduate | show | status | unlink-run | delete
-terra known link-run | promote | show | unlink-run | delete   # create retired → graduate
+terra known get | depend | reaffirm | link-run | promote | show | unlink-run | delete
+terra gate       # mechanical debt check (all maps)
 terra plan create | link-run --leg | promote | show
 terra run list | show | void | delete
 terra map status

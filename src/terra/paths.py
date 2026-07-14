@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+from contextlib import contextmanager
 import re
 from contextvars import ContextVar
 from datetime import datetime, timezone
@@ -70,6 +71,16 @@ def route_path(project_root: Path) -> Path:
 def set_active_map_id(map_id: str | None) -> None:
     """Set active map for this context (CLI --map). None clears override."""
     _active_map_id.set(map_id)
+
+
+@contextmanager
+def scoped_map(map_id: str):
+    """Pin the active map for a with-block (multi-map scans)."""
+    token = _active_map_id.set(_normalize_map_id(map_id))
+    try:
+        yield
+    finally:
+        _active_map_id.reset(token)
 
 
 def get_active_map_id(project_root: Path | None = None) -> str:
@@ -148,6 +159,21 @@ def knowns_root(project_root: Path) -> Path:
 
 def known_path(project_root: Path, known_id: str) -> Path:
     return knowns_root(project_root) / f"{known_id}.json"
+
+
+def consumers_root(project_root: Path) -> Path:
+    """Consumption edges: who read which known (map-scoped, like knowns)."""
+    return map_root(project_root) / "consumers"
+
+
+def consumer_path(project_root: Path, known_id: str) -> Path:
+    return consumers_root(project_root) / f"{known_id}.json"
+
+
+def ensure_consumers_store(project_root: Path) -> Path:
+    root = consumers_root(project_root)
+    root.mkdir(parents=True, exist_ok=True)
+    return root
 
 
 def runs_root(project_root: Path) -> Path:

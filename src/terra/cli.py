@@ -710,14 +710,47 @@ def cmd_route_start(args: argparse.Namespace) -> int:
 
 def cmd_route_complete(args: argparse.Namespace) -> int:
     from .agent_io import emit, error, success
-    from .route import complete_task
+    from .route import _get_task, complete_task, load_route
 
     try:
         root = require_project_root()
-        t = complete_task(root, args.id, evidence=args.evidence)
+        task = _get_task(load_route(root), args.id)
+        gate_meta: dict[str, Any] = {}
+        if "deliverable" in (task.get("skill"), task.get("role")):
+            from .gate import check_gate
+
+            verdict = check_gate(root)
+            if not verdict["ok"]:
+                override = getattr(args, "skip_gate", None)
+                if not override:
+                    lines = [
+                        f"[{v['kind']}] {v['map_id']}/{v['id']}: {v['why']}"
+                        for v in verdict["violations"]
+                    ]
+                    return emit(
+                        error(
+                            "deliverable task blocked by gate — resolve the "
+                            "debt or record an override with --skip-gate "
+                            "'<reason>':\n  " + "\n  ".join(lines),
+                            code="route_gate",
+                            meta={"violations": verdict["violations"]},
+                        )
+                    )
+                gate_meta = {
+                    "gate_overridden": override,
+                    "gate_violations": len(verdict["violations"]),
+                }
+        ev = args.evidence
+        if gate_meta:
+            note = (
+                f"GATE OVERRIDE ({gate_meta['gate_violations']} violations): "
+                f"{gate_meta['gate_overridden']}"
+            )
+            ev = f"{ev} | {note}" if ev else note
+        t = complete_task(root, args.id, evidence=ev)
     except (FileNotFoundError, ValueError, OSError) as e:
         return emit(error(str(e), code="route_complete"))
-    return emit(success(t, meta={"surface": "terra.route.complete"}))
+    return emit(success(t, meta={"surface": "terra.route.complete", **gate_meta}))
 
 
 def cmd_route_block(args: argparse.Namespace) -> int:
@@ -1108,7 +1141,103 @@ def cmd_known_show(args: argparse.Namespace) -> int:
                 f"min={st.get('min')}  max={st.get('max')}"
             )
     print(f"run_ids: {rec.get('run_ids') or []}")
+    deps = rec.get("deps") or {}
+    if deps.get("knowns") or deps.get("files"):
+        dep_bits = [f"known:{d.get('id')}" for d in deps.get("knowns") or []]
+        dep_bits += [f"file:{d.get('path')}" for d in deps.get("files") or []]
+        print(f"deps: {dep_bits}")
+    from .readings import list_consumers
+    from .staleness import compute_staleness
+
+    info = compute_staleness(root).get(args.id) or {}
+    if info.get("stale"):
+        print(f"STALE: {'; '.join(info.get('reasons') or [])}")
+    consumers = list_consumers(root, args.id)
+    if consumers:
+        print(
+            "consumers: "
+            + ", ".join(str(c.get("consumer")) for c in consumers)
+        )
     return 0
+
+
+def cmd_known_get(args: argparse.Namespace) -> int:
+    """Read path — the single place a number lives. Loud on debt."""
+    from .readings import read_known
+
+    try:
+        root = require_project_root()
+        reading = read_known(
+            root,
+            args.id,
+            min_conf=args.min_conf,
+            allow_stale=bool(args.allow_stale),
+            consumer=args.consumer,
+        )
+    except (ValueError, FileNotFoundError, OSError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    if args.raw:
+        print(reading["value"])
+        return 0
+    print(json.dumps(reading, indent=2, sort_keys=True, default=str))
+    return 0
+
+
+def cmd_known_depend(args: argparse.Namespace) -> int:
+    from .knowns import add_dependency
+
+    try:
+        root = require_project_root()
+        rec = add_dependency(root, args.id, args.on or [])
+    except (ValueError, FileNotFoundError, OSError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    deps = rec.get("deps") or {}
+    print(
+        f"known {rec['id']}  deps: "
+        f"knowns={[d.get('id') for d in deps.get('knowns') or []]}  "
+        f"files={[d.get('path') for d in deps.get('files') or []]}"
+    )
+    return 0
+
+
+def cmd_known_reaffirm(args: argparse.Namespace) -> int:
+    from .knowns import reaffirm_known
+
+    try:
+        root = require_project_root()
+        rec = reaffirm_known(root, args.id, reason=args.reason)
+    except (ValueError, FileNotFoundError, OSError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    print(
+        f"reaffirmed known {rec['id']} "
+        f"(deps re-stamped; trail in record.reaffirmed)"
+    )
+    return 0
+
+
+def cmd_gate(args: argparse.Namespace) -> int:
+    """Mechanical gate: exit 0 clean, exit 1 with violations. CI-able."""
+    from .agent_io import emit, error, success
+    from .gate import check_gate
+
+    try:
+        root = require_project_root()
+        verdict = check_gate(root, map_id=args.map_scope)
+    except (ValueError, FileNotFoundError, OSError) as e:
+        return emit(error(str(e), code="gate"))
+    if getattr(args, "human", False):
+        if verdict["ok"]:
+            print(f"GATE PASS  maps={verdict['maps_checked']}")
+            return 0
+        print(f"GATE FAIL  maps={verdict['maps_checked']}")
+        for v in verdict["violations"]:
+            print(f"  [{v['kind']}] {v['map_id']}/{v['id']}: {v['why']}")
+        return 1
+    emit(success(verdict, meta={"surface": "terra.gate"}))
+    return 0 if verdict["ok"] else 1
 
 
 def cmd_known_link_run(args: argparse.Namespace) -> int:
@@ -2462,6 +2591,58 @@ def build_parser() -> argparse.ArgumentParser:
     p_ks.add_argument("--json", action="store_true")
     p_ks.set_defaults(func=cmd_known_show)
 
+    p_kg = kn_sub.add_parser(
+        "get",
+        help="Read a known for consumption (loud if unbacked/stale/low-conf; "
+        "stamps a consumer edge)",
+    )
+    p_kg.add_argument("id")
+    p_kg.add_argument(
+        "--raw", action="store_true", help="Print bare value only (shell-able)"
+    )
+    p_kg.add_argument(
+        "--min-conf",
+        dest="min_conf",
+        default="low",
+        choices=sorted(CONFIDENCE_SET),
+        help="Refuse below this confidence (default low)",
+    )
+    p_kg.add_argument(
+        "--allow-stale",
+        dest="allow_stale",
+        action="store_true",
+        help="Read even if a dependency moved (recorded, not recommended)",
+    )
+    p_kg.add_argument(
+        "--consumer",
+        default=None,
+        help="Reader identity (default: probe ctx / $TERRA_CONSUMER / tool:argv0)",
+    )
+    p_kg.set_defaults(func=cmd_known_get)
+
+    p_kd = kn_sub.add_parser(
+        "depend",
+        help="Declare deps: --on known:<id> --on file:<relpath> "
+        "(dep moves → this known goes stale)",
+    )
+    p_kd.add_argument("id")
+    p_kd.add_argument(
+        "--on",
+        action="append",
+        required=True,
+        metavar="known:<id>|file:<relpath>",
+        help="Dependency spec (repeatable)",
+    )
+    p_kd.set_defaults(func=cmd_known_depend)
+
+    p_kra = kn_sub.add_parser(
+        "reaffirm",
+        help="Verified-unchanged: re-stamp dep freshness with a recorded reason",
+    )
+    p_kra.add_argument("id")
+    p_kra.add_argument("--reason", required=True)
+    p_kra.set_defaults(func=cmd_known_reaffirm)
+
     p_klr = kn_sub.add_parser("link-run", help="Add a sample run; recompute n/mean/std")
     p_klr.add_argument("id")
     p_klr.add_argument("run_id")
@@ -2701,6 +2882,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_ben.add_argument("--notes", default=None)
     p_ben.set_defaults(func=cmd_brief_enabler)
 
+    # --- gate (mechanical debt collector) ---
+    p_gate = sub.add_parser(
+        "gate",
+        help="Mechanical gate: exit 0 iff no blocking unknowns, stale/unbacked "
+        "knowns, or incomplete plans (all maps)",
+    )
+    p_gate.add_argument(
+        "--map",
+        dest="map_scope",
+        default=None,
+        help="Check one map only (default: every map — debt cannot hide)",
+    )
+    p_gate.add_argument("--human", action="store_true", help="Prose output")
+    p_gate.set_defaults(func=cmd_gate)
+
     # --- route (task DAG) ---
     p_rt = sub.add_parser(
         "route",
@@ -2871,6 +3067,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_rc = rt_sub.add_parser("complete", help="Mark task done")
     p_rc.add_argument("id")
     p_rc.add_argument("--evidence", default=None)
+    p_rc.add_argument(
+        "--skip-gate",
+        dest="skip_gate",
+        default=None,
+        help="Override a failing gate on a deliverable task (reason recorded)",
+    )
     p_rc.set_defaults(func=cmd_route_complete)
 
     p_rb = rt_sub.add_parser("block", help="Block a task")

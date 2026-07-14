@@ -52,7 +52,8 @@ terra map status --human            # secondary
 terra map create exp --use
 terra unknown create u --type number --quantity q --claim "c?" --evidence "e"
 terra probe create p --purpose "p" --kind watch
-# implement measures; validate; run --json; link-run; unknown graduate → known; void
+# implement measures; validate; run --json; link-run; unknown graduate → known
+# known get/depend/reaffirm; terra gate; void
 terra map status --all              # MUST see session attention when active=global
 
 # budget / plan lock (if you touched brief.py / route.py)
@@ -179,7 +180,20 @@ unknown (`resolved_by=known:<id>`) and stamps `origin_unknown_id`. Evidence
 voided away later → `known_unbacked` attention in map status.
 Tests: `tests/test_graduate.py`.
 
-### 12. Budget vs plan vs actual vs sectors
+### 12. Known graph: read path, staleness, gate
+
+`terra known get` / `terra.readings.known()` is the consumption path — loud on
+missing/unbacked/stale/low-conf; stamps consumer edges under
+`.terra/map/<scope>/consumers/`. Deps (`known depend --on known:x|file:y`)
+drive **computed** staleness (never stored): sha256 for files, `as_of` vs
+upstream `updated_at` for knowns, cascade + cycles stale. Stamps refresh only
+on link-run / reaffirm / depend. `terra gate` exits 1 on blocking unknowns,
+stale/unbacked knowns, incomplete plans across ALL maps; `route complete` on
+deliverable tasks runs it (`--skip-gate "<reason>"` is recorded).
+`run_probe` sets consumer `probe:<id>` via `readings.consumer_scope`.
+Tests: `tests/test_readings_staleness_gate.py`.
+
+### 13. Budget vs plan vs actual vs sectors
 
 - `brief.budget_points` = authorized total (terra-brief).  
 - `route.sectors[]` = reserved provisions (`reserved_points`).  

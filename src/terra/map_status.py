@@ -83,6 +83,9 @@ def collect_map_status(
         runs = list_runs(project_root)
         suites = list_suites(project_root)
         belief = str(map_root(project_root))
+        from .staleness import compute_staleness
+
+        stale_map = compute_staleness(project_root)
 
     open_unk = []
     blocking = []
@@ -133,6 +136,7 @@ def collect_map_status(
             "knowns_low": len(known_by_conf["low"]),
             "knowns_med": len(known_by_conf["med"]),
             "knowns_high": len(known_by_conf["high"]),
+            "knowns_stale": sum(1 for v in stale_map.values() if v.get("stale")),
             "plans": len(plans),
             "plans_open": len(plan_open),
             "plans_done": len(plan_done),
@@ -163,6 +167,16 @@ def collect_map_status(
                 ),
                 "n": ((k.get("record") or {}).get("stats") or {}).get("n"),
                 "runs": len((k.get("record") or {}).get("run_ids") or []),
+                "stale": bool(
+                    (stale_map.get(
+                        str((k.get("record") or {}).get("id") or k.get("id"))
+                    ) or {}).get("stale")
+                ),
+                "stale_reasons": list(
+                    (stale_map.get(
+                        str((k.get("record") or {}).get("id") or k.get("id"))
+                    ) or {}).get("reasons") or []
+                ),
                 "claim": ((k.get("record") or {}).get("claim") or "")[:80],
                 "ok": k.get("ok"),
             }
@@ -347,6 +361,29 @@ def _derive_agent_guidance(
                 )
 
         for k in scope.get("knowns") or []:
+            if k.get("stale"):
+                kid = str(k.get("id") or "")
+                attention.append(
+                    attention_item(
+                        "known_stale",
+                        id=kid,
+                        severity="high",
+                        why=(
+                            f"known {kid} on map {mid} is stale: "
+                            + "; ".join(k.get("stale_reasons") or [])
+                        ),
+                        extra={"map_id": mid},
+                    )
+                )
+                next_actions.append(
+                    action(
+                        "known.rederive",
+                        ["terra", *map_flag, "known", "show", kid],
+                        why="dependency moved — re-run probe + link-run, or reaffirm",
+                        priority=12,
+                        map_id=mid,
+                    )
+                )
             if (k.get("runs") or 0) > 0:
                 continue
             kid = str(k.get("id") or "")
