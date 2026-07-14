@@ -87,6 +87,14 @@ terra unknown graduate <unknown_id> [--as <known_slug>]
 # requires: unknown typed + ≥1 live linked run
 # carries type/quantity/expression/runs over; resolves the unknown; known starts low/provisional
 
+# Funnel: sibling unknowns asking the SAME question (type+quantity) → one known
+terra unknown graduate mass_cad --with mass_sheet,mass_mockup --as mtow
+# evidence unions (often multi-method at birth → corroboration); all resolve;
+# origin_unknown_ids records every contributor; conflicting --within errors
+
+# Late-arriving question → merge into the existing known (no competitor minted)
+terra unknown graduate mass_fuel_check --into mtow
+
 terra known link-run <slug> <run_id2>
 terra known promote <slug> med           # blocks if ladder / !holds
 ```
@@ -152,7 +160,7 @@ probes → runs → knowns/unknowns (number | boolean | formula)
 ## CLI (beliefs)
 
 ```bash
-terra unknown create | link-probe | link-run | graduate | show | status | unlink-run | delete
+terra unknown create | link-probe | link-run | graduate [--with|--into] | show | status | unlink-run | delete
 terra known get | depend | graph | tree | tolerance | reaffirm | link-run | promote | show | unlink-run | delete
 terra design add | attach | check | refresh | get | remove | detach
 terra gate       # mechanical debt check (all maps + design)

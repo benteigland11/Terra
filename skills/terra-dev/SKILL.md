@@ -178,7 +178,11 @@ substrate (`create_known`, `set_known`) also refuses birth without a run.
 Graduation needs a **typed** unknown + ≥1 live linked run; it resolves the
 unknown (`resolved_by=known:<id>`) and stamps `origin_unknown_id`. Evidence
 voided away later → `known_unbacked` attention in map status.
-Tests: `tests/test_graduate.py`.
+Funnel: `graduate --with u2,u3` merges same-type+quantity siblings at birth
+(evidence unions, all resolve, origin_unknown_ids, conflicting tolerances
+error); `--into <known>` merges into an existing known (type/quantity
+checked; --as/--into exclusive). Tests: `tests/test_graduate.py`,
+`tests/test_graduate_merge.py`.
 
 ### 12. Known graph: read path, staleness, gate
 

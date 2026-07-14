@@ -44,6 +44,8 @@ Preferred close loop — **graduate** when the answer should live on as a known
 terra probe run <probe> --to '{…}'
 terra unknown link-run <unknown> <run_id>
 terra unknown graduate <unknown> [--as <known_slug>]   # typed + live run → known
+terra unknown graduate <u1> --with <u2,u3> --as <slug> # siblings funnel into ONE known
+terra unknown graduate <late_u> --into <known_id>      # merge into existing known
 # or, answered but no durable anchor needed:
 terra unknown status <unknown> resolved
 ```

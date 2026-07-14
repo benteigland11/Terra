@@ -243,39 +243,9 @@ def create_known(
     return path
 
 
-def graduate_unknown(
-    project_root: Path,
-    unknown_id: str,
-    *,
-    known_id: str | None = None,
-    notes: str | None = None,
-    force: bool = False,
-) -> dict[str, Any]:
-    """Graduate a resolved-worthy unknown into a known — the only birth path.
-
-    Requires the unknown to be typed and to carry >=1 non-voided linked run.
-    Atomically: writes the known (claim/type/evidence carried over, plus
-    ``origin_unknown_id``) and marks the unknown resolved by it.
-    """
-    from .unknowns import load_unknown, save_unknown
-
-    kid = known_id or unknown_id
-    if not _SLUG_RE.match(kid):
-        raise ValueError(f"known id {kid!r} must match {_SLUG_RE.pattern}")
-
-    unk = load_unknown(project_root, unknown_id)
-    mtype = unk.get("type")
-    if mtype not in MAP_TYPES:
-        raise ValueError(
-            f"unknown {unknown_id!r} is untyped — graduation needs a typed "
-            f"question ({sorted(MAP_TYPES)}).\n"
-            "  Set the type where the question lives:\n"
-            f"    terra unknown create {unknown_id} --force --type number "
-            "--quantity <q> --claim \"…\"  # or boolean/formula"
-        )
-
-    live_runs: list[str] = []
-    for rid in unk.get("run_ids") or []:
+def _live_runs(project_root: Path, run_ids: list[str]) -> list[str]:
+    out: list[str] = []
+    for rid in run_ids or []:
         meta_path = run_dir(project_root, rid) / RUN_META_NAME
         if not meta_path.is_file():
             continue
@@ -284,41 +254,182 @@ def graduate_unknown(
         except (json.JSONDecodeError, OSError):
             continue
         if not meta.get("voided"):
-            live_runs.append(rid)
-    if not live_runs:
+            out.append(rid)
+    return out
+
+
+def _check_mergeable(contributors: list[dict[str, Any]]) -> None:
+    """Same question, different angles: type + quantity must match."""
+    first = contributors[0]
+    mtype = first.get("type")
+    for unk in contributors:
+        uid = unk.get("id")
+        if unk.get("type") not in MAP_TYPES:
+            raise ValueError(
+                f"unknown {uid!r} is untyped — graduation needs a typed "
+                f"question ({sorted(MAP_TYPES)}).\n"
+                "  Set the type where the question lives:\n"
+                f"    terra unknown create {uid} --force --type number "
+                "--quantity <q> --claim \"…\"  # or boolean/formula"
+            )
+        if unk.get("type") != mtype:
+            raise ValueError(
+                f"cannot merge: unknown {uid!r} is type={unk.get('type')!r} "
+                f"but {first.get('id')!r} is type={mtype!r} — different "
+                "questions do not funnel into one known"
+            )
+        if mtype in SCALAR_TYPES and unk.get("quantity") != first.get("quantity"):
+            raise ValueError(
+                f"cannot merge: unknown {uid!r} measures "
+                f"{unk.get('quantity')!r} but {first.get('id')!r} measures "
+                f"{first.get('quantity')!r} — same known needs same quantity"
+            )
+        if mtype == "formula" and (
+            unk.get("expression") != first.get("expression")
+            or unk.get("vars") != first.get("vars")
+        ):
+            raise ValueError(
+                f"cannot merge formula unknowns {first.get('id')!r} and "
+                f"{uid!r}: expression/vars differ"
+            )
+    tolerances = {
+        str(u.get("tolerance"))
+        for u in contributors
+        if u.get("tolerance") is not None
+    }
+    if len(tolerances) > 1:
         raise ValueError(
-            f"unknown {unknown_id!r} has no live (non-voided) linked runs — "
+            f"cannot merge: contributors declare conflicting tolerances "
+            f"{sorted(tolerances)} — align them first "
+            "(terra unknown create --force --within …)"
+        )
+
+
+def graduate_unknown(
+    project_root: Path,
+    unknown_id: str,
+    *,
+    known_id: str | None = None,
+    with_ids: list[str] | None = None,
+    into: str | None = None,
+    notes: str | None = None,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Graduate unknown(s) into a known — the only birth path.
+
+    ``with_ids`` merges sibling unknowns asking the same question (same
+    type + quantity) into one known at birth: evidence unions, every
+    contributor resolves, ``origin_unknown_ids`` records them all.
+    ``into`` merges the unknown(s) into an EXISTING known instead.
+    Every path requires >=1 live (non-voided) linked run in the union.
+    """
+    from .unknowns import load_unknown, save_unknown
+
+    if into and known_id:
+        raise ValueError("--as and --into are mutually exclusive")
+    kid = into or known_id or unknown_id
+    if not _SLUG_RE.match(kid):
+        raise ValueError(f"known id {kid!r} must match {_SLUG_RE.pattern}")
+
+    ids: list[str] = [unknown_id]
+    for extra in with_ids or []:
+        if extra not in ids:
+            ids.append(extra)
+    contributors = [load_unknown(project_root, uid) for uid in ids]
+    _check_mergeable(contributors)
+    first = contributors[0]
+    mtype = str(first.get("type"))
+
+    # Union live evidence across contributors (order-preserving)
+    all_runs: list[str] = []
+    all_probes: list[str] = []
+    for unk in contributors:
+        for rid in _live_runs(project_root, list(unk.get("run_ids") or [])):
+            if rid not in all_runs:
+                all_runs.append(rid)
+        for pid in unk.get("probe_ids") or []:
+            if pid not in all_probes:
+                all_probes.append(pid)
+    if not all_runs:
+        raise ValueError(
+            f"unknown(s) {ids} have no live (non-voided) linked runs — "
             "no run, no known.\n"
             f"    terra probe run <probe_id> --to '…' --json\n"
             f"    terra unknown link-run {unknown_id} <run_id>\n"
             f"    terra unknown graduate {unknown_id}"
         )
-
-    primary = unk.get("primary_run_id")
-    if primary not in live_runs:
-        primary = live_runs[0]
-
-    create_known(
-        project_root,
-        kid,
-        claim=str(unk.get("claim") or ""),
-        quantity=unk.get("quantity"),
-        map_type=str(mtype),
-        unit=str(unk.get("unit") or ""),
-        run_id=primary,
-        run_ids=live_runs,
-        probe_ids=list(unk.get("probe_ids") or []),
-        notes=notes if notes is not None else str(unk.get("notes") or ""),
-        force=force,
-        expression=unk.get("expression"),
-        vars=unk.get("vars"),
-        origin_unknown_id=unknown_id,
-        tolerance=unk.get("tolerance"),
+    tolerance = next(
+        (u.get("tolerance") for u in contributors if u.get("tolerance") is not None),
+        None,
     )
 
-    unk["status"] = "resolved"
-    unk["resolved_by"] = f"known:{kid}"
-    save_unknown(project_root, unk)
+    if into:
+        rec = load_known(project_root, kid)  # loud if missing
+        if rec.get("type") != mtype:
+            raise ValueError(
+                f"cannot merge into known {kid!r}: it is type="
+                f"{rec.get('type')!r}, unknowns are type={mtype!r}"
+            )
+        if mtype in SCALAR_TYPES and rec.get("quantity") != first.get("quantity"):
+            raise ValueError(
+                f"cannot merge into known {kid!r}: it measures "
+                f"{rec.get('quantity')!r}, unknowns measure "
+                f"{first.get('quantity')!r}"
+            )
+        rids = list(rec.get("run_ids") or [])
+        for rid in all_runs:
+            if rid not in rids:
+                rids.append(rid)
+        rec["run_ids"] = rids
+        pids = list(rec.get("probe_ids") or [])
+        for pid in all_probes:
+            if pid not in pids:
+                pids.append(pid)
+        rec["probe_ids"] = pids
+        origins = list(rec.get("origin_unknown_ids") or [])
+        if rec.get("origin_unknown_id") and rec["origin_unknown_id"] not in origins:
+            origins.insert(0, rec["origin_unknown_id"])
+        for uid in ids:
+            if uid not in origins:
+                origins.append(uid)
+        rec["origin_unknown_ids"] = origins
+        if tolerance is not None and rec.get("tolerance") is None:
+            rec["tolerance"] = tolerance
+        if rec.get("deps"):
+            from .staleness import stamp_deps
+
+            stamp_deps(project_root, rec)
+        save_known(project_root, rec)
+    else:
+        primary = first.get("primary_run_id")
+        if primary not in all_runs:
+            primary = all_runs[0]
+        create_known(
+            project_root,
+            kid,
+            claim=str(first.get("claim") or ""),
+            quantity=first.get("quantity"),
+            map_type=mtype,
+            unit=str(first.get("unit") or ""),
+            run_id=primary,
+            run_ids=all_runs,
+            probe_ids=all_probes,
+            notes=notes if notes is not None else str(first.get("notes") or ""),
+            force=force,
+            expression=first.get("expression"),
+            vars=first.get("vars"),
+            origin_unknown_id=unknown_id,
+            tolerance=tolerance,
+        )
+        if len(ids) > 1:
+            rec = load_known(project_root, kid)
+            rec["origin_unknown_ids"] = list(ids)
+            save_known(project_root, rec)
+
+    for unk in contributors:
+        unk["status"] = "resolved"
+        unk["resolved_by"] = f"known:{kid}"
+        save_unknown(project_root, unk)
     return load_known(project_root, kid)
 
 

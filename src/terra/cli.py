@@ -1562,10 +1562,17 @@ def cmd_unknown_graduate(args: argparse.Namespace) -> int:
 
     try:
         root = require_project_root()
+        with_ids = [
+            u.strip()
+            for u in (getattr(args, "with_ids", None) or "").split(",")
+            if u.strip()
+        ]
         rec = graduate_unknown(
             root,
             args.id,
             known_id=getattr(args, "as_id", None),
+            with_ids=with_ids or None,
+            into=getattr(args, "into", None),
             notes=args.notes,
             force=args.force,
         )
@@ -1577,9 +1584,15 @@ def cmd_unknown_graduate(args: argparse.Namespace) -> int:
         return 0
     from .paths import known_path as _known_path
 
-    _print_known_summary("graduated", rec, _known_path(root, rec["id"]))
+    _print_known_summary(
+        "merged into" if getattr(args, "into", None) else "graduated",
+        rec,
+        _known_path(root, rec["id"]),
+    )
+    resolved = [args.id] + (with_ids or [])
     print(
-        f"  unknown {args.id} resolved (resolved_by=known:{rec['id']})\n"
+        f"  unknown(s) {', '.join(resolved)} resolved "
+        f"(resolved_by=known:{rec['id']})\n"
         f"  next: terra known link-run {rec['id']} <run_id>  "
         f"then  terra known promote {rec['id']} med"
     )
@@ -2658,6 +2671,20 @@ def build_parser() -> argparse.ArgumentParser:
         dest="as_id",
         default=None,
         help="Known slug (default: same as unknown id)",
+    )
+    p_ugr.add_argument(
+        "--with",
+        dest="with_ids",
+        default=None,
+        metavar="U1,U2",
+        help="Merge sibling unknowns (same type+quantity) into the same "
+        "known: evidence unions, all resolve",
+    )
+    p_ugr.add_argument(
+        "--into",
+        default=None,
+        metavar="KNOWN_ID",
+        help="Merge into an EXISTING known instead of minting a new one",
     )
     p_ugr.add_argument("--notes", default=None)
     p_ugr.add_argument(
