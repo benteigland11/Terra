@@ -66,3 +66,44 @@ def test_describe_and_unlink(tmp_path: Path, monkeypatch):
     rec = load_unknown(tmp_path, "gap")
     assert rec["run_ids"] == []
     assert rec["primary_run_id"] is None
+
+
+def test_link_run_to_resolved_unknown_warns(tmp_path, monkeypatch, capsys):
+    """CLI notes to the agent: runs on a resolved unknown feed nothing."""
+    import argparse
+
+    from terra.cli import cmd_unknown_link_run
+    from terra.knowns import graduate_unknown
+    from terra.probe_init import init_probe
+    from terra.probe_run import run_probe
+    from terra.unknowns import create_unknown, link_run
+
+    monkeypatch.chdir(tmp_path)
+    init_probe(tmp_path, "p", purpose="p")
+    pdir = tmp_path / ".terra" / "map" / "probes" / "p"
+    (pdir / "probe.py").write_text(
+        "def run(ctx=None):\n"
+        "    ctx = ctx or {}\n"
+        "    to = ctx.get('to') or {'kind': 'default'}\n"
+        "    if ctx.get('dry_run'):\n"
+        "        return {'to': to, 'status': 'ok', 'artifacts': []}\n"
+        "    return {'to': to, 'status': 'ok', 'artifacts': [],\n"
+        "            'measures': [{'quantity': 'q', 'value': 1}]}\n",
+        encoding="utf-8",
+    )
+    create_unknown(
+        tmp_path, "u", claim="q?", evidence_needed="e",
+        map_type="number", quantity="q",
+    )
+    r1 = run_probe(tmp_path, "p", to={"kind": "region"}).get("id")
+    link_run(tmp_path, "u", r1)
+    graduate_unknown(tmp_path, "u", known_id="fact")
+
+    r2 = run_probe(tmp_path, "p", to={"kind": "region"}).get("id")
+    rc = cmd_unknown_link_run(
+        argparse.Namespace(id="u", run_id=r2, primary=False)
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "NOTE: this unknown is resolved by known:fact" in out
+    assert f"terra known link-run fact {r2}" in out

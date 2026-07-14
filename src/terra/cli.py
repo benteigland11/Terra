@@ -1675,6 +1675,19 @@ def cmd_unknown_link_run(args: argparse.Namespace) -> int:
         f"unknown {rec['id']}  run_ids={rec.get('run_ids')}  "
         f"primary_run={rec.get('primary_run_id')}  status={rec['status']}"
     )
+    if rec.get("status") in ("resolved", "wont_care"):
+        resolved_by = str(rec.get("resolved_by") or "")
+        hint = (
+            f"    terra known link-run {resolved_by.removeprefix('known:')} "
+            f"{args.run_id}"
+            if resolved_by.startswith("known:")
+            else "    (runs on a closed unknown feed nothing downstream)"
+        )
+        print(
+            f"  NOTE: this unknown is {rec['status']}"
+            f"{' by ' + resolved_by if resolved_by else ''} — linked runs "
+            f"here feed NO known's stats. Did you mean:\n{hint}"
+        )
     return 0
 
 
