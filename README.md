@@ -99,17 +99,22 @@ See [docs/to-schema.md](docs/to-schema.md). Probes may ignore extra keys.
 (freeform still allowed; live runs warn). Filter: `terra run list --status unavailable`.  
 See [docs/status-vocab.md](docs/status-vocab.md).
 
-**Knowns** (typed anchors; first type **number**):
+**Knowns** (typed anchors) are born only by **graduating** an evidence-bearing
+unknown — no run, no known:
 
 ```bash
 # probe returns measures: [{"quantity":"hostile_count","value":3}]
-terra known create est --claim "…" --quantity hostile_count --from-run <run_id>
+terra unknown create est --type number --quantity hostile_count \
+  --claim "…?" --evidence "probe reading"
+terra unknown link-run est <run_id>
+terra unknown graduate est [--as <known_slug>]  # → known (low, provisional); resolves unknown
 terra known link-run est <run_id2>
 terra known promote est med   # blocks if n too small
 terra known show est          # n, mean, std
 ```
 
-Unknowns can also be `--type number --quantity q` (same stats on link-run).
+`terra known create` is retired; a known whose evidence is later voided away
+shows up in `map status` attention as `known_unbacked`.
 
 **Suites** (ordered recipes, shared `to` — not domain plugins):
 

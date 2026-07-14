@@ -15,12 +15,15 @@ Agents own the expression and var bindings. Terra recomputes stats.
 ## Example
 
 ```bash
-terra known create sparse_night \
+terra unknown create sparse_night \
   --type formula \
-  --claim "Night hostiles in R stay low" \
+  --claim "Night hostiles in R stay low?" \
   --expression "mean(h) <= 10 and n(h) >= 3" \
   --var h=hostile_count \
-  --from-run <run_id>
+  --evidence "repeated probe measures"
+
+terra unknown link-run sparse_night <run_id>
+terra unknown graduate sparse_night   # → known; resolves the unknown
 
 terra known link-run sparse_night <run2>
 terra known show sparse_night

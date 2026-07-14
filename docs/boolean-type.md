@@ -42,10 +42,8 @@ terra unknown create rcon_up \
   --claim "Is RCON up on local dev?" \
   --evidence "repeated reachability trials"
 
-terra known create rcon_ok \
-  --type boolean --quantity rcon_reachable \
-  --claim "RCON is reachable on local dev" \
-  --from-run <run_id>
+terra unknown link-run rcon_up <run_id>
+terra unknown graduate rcon_up --as rcon_ok   # → known; resolves the unknown
 
 terra known link-run rcon_ok <run_id2>
 terra known promote rcon_ok med

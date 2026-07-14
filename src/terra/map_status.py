@@ -162,6 +162,7 @@ def collect_map_status(
                     "confidence_derived"
                 ),
                 "n": ((k.get("record") or {}).get("stats") or {}).get("n"),
+                "runs": len((k.get("record") or {}).get("run_ids") or []),
                 "claim": ((k.get("record") or {}).get("claim") or "")[:80],
                 "ok": k.get("ok"),
             }
@@ -344,6 +345,32 @@ def _derive_agent_guidance(
                         map_id=mid,
                     )
                 )
+
+        for k in scope.get("knowns") or []:
+            if (k.get("runs") or 0) > 0:
+                continue
+            kid = str(k.get("id") or "")
+            attention.append(
+                attention_item(
+                    "known_unbacked",
+                    id=kid,
+                    severity="high",
+                    why=(
+                        f"known {kid} on map {mid} has no live linked runs "
+                        "(evidence voided/unlinked) — belief is unbacked"
+                    ),
+                    extra={"map_id": mid, "confidence": k.get("confidence")},
+                )
+            )
+            next_actions.append(
+                action(
+                    "known.link-run",
+                    ["terra", *map_flag, "known", "link-run", kid, "<run_id>"],
+                    why="re-back the known with a live run or delete it",
+                    priority=15,
+                    map_id=mid,
+                )
+            )
 
         for r in scope.get("runs_recent") or []:
             if not r.get("voided"):

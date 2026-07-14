@@ -113,6 +113,15 @@ def validate_known_record(data: Any, *, expected_id: str | None = None) -> list[
     return blocks
 
 
+_EVIDENCE_AT_BIRTH_MSG = (
+    "knowns require evidence at birth — no run, no known.\n"
+    "  Survey path (the only birth path):\n"
+    "    terra unknown create <slug> --type … --quantity … --claim \"…\" --evidence \"…\"\n"
+    "    terra unknown link-run <slug> <run_id>\n"
+    "    terra unknown graduate <slug>            # → known + resolves the unknown"
+)
+
+
 def create_known(
     project_root: Path,
     known_id: str,
@@ -128,11 +137,16 @@ def create_known(
     force: bool = False,
     expression: str | None = None,
     vars: dict[str, Any] | list[str] | str | None = None,
+    run_ids: list[str] | None = None,
+    probe_ids: list[str] | None = None,
+    origin_unknown_id: str | None = None,
 ) -> Path:
     if not _SLUG_RE.match(known_id):
         raise ValueError(f"known id {known_id!r} must match {_SLUG_RE.pattern}")
     if not claim or not str(claim).strip():
         raise ValueError("claim is required")
+    if not run_id and not run_ids:
+        raise ValueError(_EVIDENCE_AT_BIRTH_MSG)
     if map_type not in MAP_TYPES:
         raise ValueError(
             f"type must be one of {sorted(MAP_TYPES)} "
@@ -147,6 +161,11 @@ def create_known(
     path = known_path(project_root, known_id)
     if path.exists() and not force:
         raise FileExistsError(f"known already exists: {path}")
+
+    all_run_ids = list(run_ids or [])
+    if run_id and run_id not in all_run_ids:
+        all_run_ids.insert(0, run_id)
+    primary_run = run_id or (all_run_ids[0] if all_run_ids else None)
 
     now = _now()
     if map_type == "formula":
@@ -165,9 +184,9 @@ def create_known(
             "vars": vars_spec,
             "status": status,
             "confidence": "low",
-            "run_ids": [run_id] if run_id else [],
-            "probe_ids": [],
-            "primary_run_id": run_id,
+            "run_ids": all_run_ids,
+            "probe_ids": list(probe_ids or []),
+            "primary_run_id": primary_run,
             "stats": empty_formula_stats(),
             "confidence_derived": "low",
             "notes": notes or "",
@@ -187,26 +206,28 @@ def create_known(
             "unit": (unit or "").strip(),
             "status": status,
             "confidence": "low",
-            "run_ids": [run_id] if run_id else [],
-            "probe_ids": [],
-            "primary_run_id": run_id,
+            "run_ids": all_run_ids,
+            "probe_ids": list(probe_ids or []),
+            "primary_run_id": primary_run,
             "stats": empty_stats(map_type),
             "confidence_derived": "low",
             "notes": notes or "",
             "created_at": now,
             "updated_at": now,
         }
-    if run_id:
-        if not (run_dir(project_root, run_id) / RUN_META_NAME).is_file():
-            raise FileNotFoundError(f"run not found: {run_id}")
-        record = recompute_typed_node(
-            record, project_root=project_root, run_dir_fn=run_dir
-        )
-        ok, _ = can_claim_confidence(
-            record["stats"], confidence, map_type=map_type
-        )
-        if ok:
-            record["confidence"] = confidence
+    for rid in all_run_ids:
+        if not (run_dir(project_root, rid) / RUN_META_NAME).is_file():
+            raise FileNotFoundError(f"run not found: {rid}")
+    if origin_unknown_id:
+        record["origin_unknown_id"] = origin_unknown_id
+    record = recompute_typed_node(
+        record, project_root=project_root, run_dir_fn=run_dir
+    )
+    ok, _ = can_claim_confidence(
+        record["stats"], confidence, map_type=map_type
+    )
+    if ok:
+        record["confidence"] = confidence
 
     blocks = validate_known_record(record, expected_id=known_id)
     if blocks:
@@ -214,6 +235,84 @@ def create_known(
 
     path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return path
+
+
+def graduate_unknown(
+    project_root: Path,
+    unknown_id: str,
+    *,
+    known_id: str | None = None,
+    notes: str | None = None,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Graduate a resolved-worthy unknown into a known — the only birth path.
+
+    Requires the unknown to be typed and to carry >=1 non-voided linked run.
+    Atomically: writes the known (claim/type/evidence carried over, plus
+    ``origin_unknown_id``) and marks the unknown resolved by it.
+    """
+    from .unknowns import load_unknown, save_unknown
+
+    kid = known_id or unknown_id
+    if not _SLUG_RE.match(kid):
+        raise ValueError(f"known id {kid!r} must match {_SLUG_RE.pattern}")
+
+    unk = load_unknown(project_root, unknown_id)
+    mtype = unk.get("type")
+    if mtype not in MAP_TYPES:
+        raise ValueError(
+            f"unknown {unknown_id!r} is untyped — graduation needs a typed "
+            f"question ({sorted(MAP_TYPES)}).\n"
+            "  Set the type where the question lives:\n"
+            f"    terra unknown create {unknown_id} --force --type number "
+            "--quantity <q> --claim \"…\"  # or boolean/formula"
+        )
+
+    live_runs: list[str] = []
+    for rid in unk.get("run_ids") or []:
+        meta_path = run_dir(project_root, rid) / RUN_META_NAME
+        if not meta_path.is_file():
+            continue
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if not meta.get("voided"):
+            live_runs.append(rid)
+    if not live_runs:
+        raise ValueError(
+            f"unknown {unknown_id!r} has no live (non-voided) linked runs — "
+            "no run, no known.\n"
+            f"    terra probe run <probe_id> --to '…' --json\n"
+            f"    terra unknown link-run {unknown_id} <run_id>\n"
+            f"    terra unknown graduate {unknown_id}"
+        )
+
+    primary = unk.get("primary_run_id")
+    if primary not in live_runs:
+        primary = live_runs[0]
+
+    create_known(
+        project_root,
+        kid,
+        claim=str(unk.get("claim") or ""),
+        quantity=unk.get("quantity"),
+        map_type=str(mtype),
+        unit=str(unk.get("unit") or ""),
+        run_id=primary,
+        run_ids=live_runs,
+        probe_ids=list(unk.get("probe_ids") or []),
+        notes=notes if notes is not None else str(unk.get("notes") or ""),
+        force=force,
+        expression=unk.get("expression"),
+        vars=unk.get("vars"),
+        origin_unknown_id=unknown_id,
+    )
+
+    unk["status"] = "resolved"
+    unk["resolved_by"] = f"known:{kid}"
+    save_unknown(project_root, unk)
+    return load_known(project_root, kid)
 
 
 def load_known(project_root: Path, known_id: str) -> dict[str, Any]:
@@ -351,13 +450,12 @@ def set_known_status(
 # when agents invented `terra known set` (subcommand missing) + 2>/dev/null.
 _FREEHAND_VALUE_MSG = (
     "freehand --value is not supported (would skip probe evidence and stats).\n"
-    "  Sample-backed path:\n"
-    "    terra known set <id> --claim \"…\" --quantity <q> --from-run <run_id>\n"
-    "    # or: terra known create … && terra known link-run …\n"
+    "  Knowns are born by graduating an evidence-bearing unknown:\n"
+    "    terra unknown create <slug> --type … --quantity … --claim \"…\"\n"
+    "    terra unknown link-run <slug> <run_id>\n"
+    "    terra unknown graduate <slug>\n"
     "  Metadata only (existing known):\n"
-    "    terra known set <id> --claim \"…\" --notes \"…\"\n"
-    "  Provisional anchor without a run yet:\n"
-    "    terra known set <id> --claim \"…\" --quantity <q> --notes \"asserted=…\""
+    "    terra known set <id> --claim \"…\" --notes \"…\""
 )
 
 
@@ -377,10 +475,10 @@ def set_known(
     vars: dict[str, Any] | list[str] | str | None = None,
     value: Any = None,
 ) -> tuple[dict[str, Any], str]:
-    """Create-or-update a known (agent-facing ``terra known set``).
+    """Update an existing known (agent-facing ``terra known set``).
 
-    Returns ``(record, action)`` where action is ``\"created\"`` or ``\"updated\"``.
-    Always writes on success. Freehand ``value`` without a run is rejected.
+    Returns ``(record, action)`` where action is ``\"updated\"``. Knowns are
+    born only via :func:`graduate_unknown`; freehand ``value`` is rejected.
     """
     if value is not None:
         raise ValueError(_FREEHAND_VALUE_MSG)
@@ -389,28 +487,10 @@ def set_known(
     exists = path.is_file()
 
     if not exists:
-        if not claim or not str(claim).strip():
-            raise ValueError(
-                "known does not exist; --claim is required to create "
-                f"(id={known_id!r}). There is no silent set."
-            )
-        mtype = map_type or "number"
-        create_known(
-            project_root,
-            known_id,
-            claim=claim,
-            quantity=quantity,
-            map_type=mtype,
-            unit=unit or "",
-            confidence=confidence or "low",
-            status=status or "provisional",
-            run_id=run_id,
-            notes=notes or "",
-            force=False,
-            expression=expression,
-            vars=vars,
+        raise ValueError(
+            f"known {known_id!r} does not exist — set only updates.\n"
+            "  " + _EVIDENCE_AT_BIRTH_MSG.replace("\n", "\n  ")
         )
-        return load_known(project_root, known_id), "created"
 
     rec = load_known(project_root, known_id)
     changed = False

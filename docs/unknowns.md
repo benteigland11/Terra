@@ -37,10 +37,13 @@ terra unknown status <id> resolved --resolved-by "…"
 terra unknown validate
 ```
 
-Preferred close loop:
+Preferred close loop — **graduate** when the answer should live on as a known
+(the only way knowns are born), plain resolve when it should not:
 
 ```bash
 terra probe run <probe> --to '{…}'
 terra unknown link-run <unknown> <run_id>
+terra unknown graduate <unknown> [--as <known_slug>]   # typed + live run → known
+# or, answered but no durable anchor needed:
 terra unknown status <unknown> resolved
 ```

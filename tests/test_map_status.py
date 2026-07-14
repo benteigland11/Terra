@@ -15,6 +15,7 @@ from terra.map_status import (
 from terra.paths import create_session_map, write_active_map
 from terra.plans import create_plan
 from terra.probe_init import init_probe
+from terra.probe_run import run_probe
 from terra.unknowns import create_unknown
 
 
@@ -28,12 +29,14 @@ def test_status_board_active_map(tmp_path: Path, monkeypatch):
         evidence_needed="a probe reading",
         blocks_build=True,
     )
+    rid = run_probe(tmp_path, "p", to={"kind": "region"}).get("id")
     create_known(
         tmp_path,
         "fact",
         claim="q is about 1",
         quantity="q",
         map_type="number",
+        run_id=rid,
     )
     create_plan(
         tmp_path,

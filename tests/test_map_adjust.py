@@ -97,9 +97,10 @@ def test_voided_run_cannot_relink(tmp_path: Path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     init_probe(tmp_path, "p", purpose="p")
     _write_measure_probe(tmp_path, "p", quantity="q", value=1)
+    r_good = run_probe(tmp_path, "p", to={"kind": "region"}).get("id")
     rid = run_probe(tmp_path, "p", to={"kind": "region"}).get("id")
     void_run(tmp_path, rid, reason="bad", cascade=False)
-    create_known(tmp_path, "est", claim="q", quantity="q")
+    create_known(tmp_path, "est", claim="q", quantity="q", run_id=r_good)
     with pytest.raises(ValueError, match="voided"):
         link_run_known(tmp_path, "est", rid)
 

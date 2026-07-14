@@ -56,11 +56,8 @@ terra probe run mobs --to '{"kind":"region","id":"R"}'
 terra unknown link-run hostiles_r <run_id>
 terra unknown show hostiles_r   # shows n, mean, std
 
-# Encode belief (starts provisional/low)
-terra known create hostiles_r_est \
-  --claim "Night hostile count in R is about the sample mean" \
-  --quantity hostile_count \
-  --from-run <run_id>
+# Encode belief (starts provisional/low) — the only birth path
+terra unknown graduate hostiles_r --as hostiles_r_est
 
 terra known link-run hostiles_r_est <run_id2>
 terra known promote hostiles_r_est med

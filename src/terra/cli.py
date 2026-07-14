@@ -982,47 +982,21 @@ def _print_known_summary(prefix: str, rec: dict, path: Path | None = None) -> No
         print(f"  {path}")
 
 
+_KNOWN_BIRTH_MSG = (
+    "`terra known create` is retired — knowns are born by graduating an "
+    "evidence-bearing unknown.\n"
+    "  terra unknown create <slug> --type number|boolean|formula "
+    "--quantity <q> --claim \"…?\" --evidence \"…\"\n"
+    "  terra unknown link-probe <slug> <probe_id>\n"
+    "  terra probe run <probe_id> --to '…' --json\n"
+    "  terra unknown link-run <slug> <run_id>\n"
+    "  terra unknown graduate <slug> [--as <known_slug>]"
+)
+
+
 def cmd_known_create(args: argparse.Namespace) -> int:
-    try:
-        root, created = ensure_project_root()
-        mtype = getattr(args, "type", None) or "number"
-        if mtype in ("number", "boolean") and not args.quantity:
-            print(
-                "error: --quantity required for number/boolean knowns "
-                "(formula → --expression + --var; multi → terra plan)",
-                file=sys.stderr,
-            )
-            return 2
-        if mtype == "formula" and not getattr(args, "expression", None):
-            print(
-                "error: type=formula requires --expression and --var name=qty",
-                file=sys.stderr,
-            )
-            return 2
-        path = create_known(
-            root,
-            args.id,
-            claim=args.claim,
-            quantity=args.quantity,
-            map_type=mtype,
-            unit=args.unit or "",
-            confidence=args.confidence,
-            status=args.status,
-            run_id=args.from_run,
-            notes=args.notes or "",
-            force=args.force,
-            expression=getattr(args, "expression", None),
-            vars=getattr(args, "vars", None),
-        )
-    except (ValueError, FileExistsError, FileNotFoundError, OSError) as e:
-        print(f"error: {e}", file=sys.stderr)
-        return 1
-    if created:
-        print(f"initialized {root / '.terra' / 'map'}")
-    rec = load_known(root, args.id)
-    _print_known_summary("created", rec, path)
-    print("  next: terra known link-run …  then  terra known promote …")
-    return 0
+    print(f"error: {_KNOWN_BIRTH_MSG}", file=sys.stderr)
+    return 2
 
 
 def cmd_known_set(args: argparse.Namespace) -> int:
@@ -1036,29 +1010,6 @@ def cmd_known_set(args: argparse.Namespace) -> int:
     try:
         root, created = ensure_project_root()
         mtype = getattr(args, "type", None)
-        # Creating path: same required-field checks as create when type implied
-        path = known_path_for_check = None
-        from .paths import known_path as _known_path
-
-        path = _known_path(root, args.id)
-        if not path.is_file():
-            mtype = mtype or "number"
-            if mtype in ("number", "boolean") and not args.quantity:
-                print(
-                    "error: known does not exist; --quantity required for "
-                    "number/boolean create via set "
-                    "(or use terra known create)",
-                    file=sys.stderr,
-                )
-                return 2
-            if mtype == "formula" and not getattr(args, "expression", None):
-                print(
-                    "error: known does not exist; type=formula requires "
-                    "--expression and --var",
-                    file=sys.stderr,
-                )
-                return 2
-
         rec, action = set_known(
             root,
             args.id,
@@ -1082,8 +1033,6 @@ def cmd_known_set(args: argparse.Namespace) -> int:
     from .paths import known_path as _known_path
 
     _print_known_summary(action, rec, _known_path(root, args.id))
-    if action == "created" and not args.from_run:
-        print("  next: terra known link-run …  then  terra known promote …")
     return 0
 
 
@@ -1265,6 +1214,36 @@ def cmd_unknown_status(args: argparse.Namespace) -> int:
         print(f"error: {e}", file=sys.stderr)
         return 1
     print(f"unknown {rec['id']}  status={rec['status']}")
+    return 0
+
+
+def cmd_unknown_graduate(args: argparse.Namespace) -> int:
+    """Graduate an evidence-bearing unknown into a known (only birth path)."""
+    from .knowns import graduate_unknown
+
+    try:
+        root = require_project_root()
+        rec = graduate_unknown(
+            root,
+            args.id,
+            known_id=getattr(args, "as_id", None),
+            notes=args.notes,
+            force=args.force,
+        )
+    except (ValueError, FileExistsError, FileNotFoundError, OSError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps(rec, indent=2, default=str))
+        return 0
+    from .paths import known_path as _known_path
+
+    _print_known_summary("graduated", rec, _known_path(root, rec["id"]))
+    print(
+        f"  unknown {args.id} resolved (resolved_by=known:{rec['id']})\n"
+        f"  next: terra known link-run {rec['id']} <run_id>  "
+        f"then  terra known promote {rec['id']} med"
+    )
     return 0
 
 
@@ -2323,6 +2302,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_ust.add_argument("--notes", default=None)
     p_ust.set_defaults(func=cmd_unknown_status)
 
+    p_ugr = unk_sub.add_parser(
+        "graduate",
+        help="Graduate typed unknown with linked runs into a known "
+        "(the only way knowns are born)",
+    )
+    p_ugr.add_argument("id", help="Unknown id")
+    p_ugr.add_argument(
+        "--as",
+        dest="as_id",
+        default=None,
+        help="Known slug (default: same as unknown id)",
+    )
+    p_ugr.add_argument("--notes", default=None)
+    p_ugr.add_argument(
+        "--force", action="store_true", help="Overwrite existing known"
+    )
+    p_ugr.add_argument("--json", action="store_true")
+    p_ugr.set_defaults(func=cmd_unknown_graduate)
+
     p_ulp = unk_sub.add_parser(
         "link-probe",
         help="Link a probe id (multi ok via probe_ids); sets probing if was open",
@@ -2445,52 +2443,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     kn_sub = p_kn.add_subparsers(dest="known_cmd", required=True)
 
+    # Retired birth path — kept so agents get guidance, not argparse noise.
+    # Accepts (and ignores) legacy flags; always errors → unknown graduate.
     p_kc = kn_sub.add_parser(
         "create",
-        help="Create known: number|boolean|formula (plan = multi/sequence layer)",
+        help="Retired — knowns are born via `terra unknown graduate`",
     )
-    p_kc.add_argument("id", help="Slug id")
-    p_kc.add_argument("--claim", required=True, help="Falsifiable claim")
-    p_kc.add_argument(
-        "--type",
-        default="number",
-        choices=["number", "boolean", "formula"],
-        dest="type",
-        help="number | boolean | formula (observation = expr + vars)",
-    )
-    p_kc.add_argument(
-        "--quantity",
-        default=None,
-        help="For number/boolean: measure name in probe measures[]",
-    )
-    p_kc.add_argument(
-        "--expression",
-        default=None,
-        help="For formula: e.g. \"mean(h) <= 10\"",
-    )
-    p_kc.add_argument(
-        "--var",
-        action="append",
-        dest="vars",
-        default=None,
-        metavar="NAME=QTY[:kind]",
-        help="For formula: bind var (repeatable), e.g. --var h=hostile_count",
-    )
-    p_kc.add_argument("--unit", default="", help="Optional unit")
-    p_kc.add_argument(
-        "--confidence",
-        default="low",
-        choices=sorted(CONFIDENCE_SET),
-        help="Claimed confidence (capped by sample ladder; default low)",
-    )
-    p_kc.add_argument(
-        "--status",
-        default="provisional",
-        choices=sorted(KNOWN_STATUSES),
-    )
-    p_kc.add_argument("--from-run", default=None, dest="from_run", help="Seed with a run id")
-    p_kc.add_argument("--notes", default="")
-    p_kc.add_argument("--force", action="store_true")
+    p_kc.add_argument("id", nargs="?", default=None)
+    p_kc.add_argument("legacy_args", nargs=argparse.REMAINDER)
     p_kc.set_defaults(func=cmd_known_create)
 
     p_kl = kn_sub.add_parser("list", help="List knowns")

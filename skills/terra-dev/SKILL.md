@@ -52,7 +52,7 @@ terra map status --human            # secondary
 terra map create exp --use
 terra unknown create u --type number --quantity q --claim "c?" --evidence "e"
 terra probe create p --purpose "p" --kind watch
-# implement measures; validate; run --json; link-run; known/formula; void
+# implement measures; validate; run --json; link-run; unknown graduate → known; void
 terra map status --all              # MUST see session attention when active=global
 
 # budget / plan lock (if you touched brief.py / route.py)
@@ -170,7 +170,16 @@ After CLI help changes, re-read `--help` in DX smoke.
 Dev: `PYTHONPATH=src` or `pip install -e .`.  
 DX smoke should use the same `terra` users get (`~/.local/bin/terra` or venv).
 
-### 11. Budget vs plan vs actual vs sectors
+### 11. Knowns are born only via `unknown graduate`
+
+`terra known create` is retired (stub errors with the survey path); the
+substrate (`create_known`, `set_known`) also refuses birth without a run.
+Graduation needs a **typed** unknown + ≥1 live linked run; it resolves the
+unknown (`resolved_by=known:<id>`) and stamps `origin_unknown_id`. Evidence
+voided away later → `known_unbacked` attention in map status.
+Tests: `tests/test_graduate.py`.
+
+### 12. Budget vs plan vs actual vs sectors
 
 - `brief.budget_points` = authorized total (terra-brief).  
 - `route.sectors[]` = reserved provisions (`reserved_points`).  

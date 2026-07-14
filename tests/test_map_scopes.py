@@ -84,22 +84,26 @@ def test_global_and_session_knowns_do_not_mix(tmp_path: Path, monkeypatch):
     set_active_map_id(GLOBAL_MAP_ID)
     init_probe(tmp_path, "p", purpose="p")
 
+    r_global = run_probe(tmp_path, "p", to={"kind": "region"}).get("id")
     create_known(
         tmp_path,
         "k_global",
         claim="stable fact",
         map_type="number",
         quantity="q",
+        run_id=r_global,
     )
     assert [k["id"] for k in list_knowns(tmp_path)] == ["k_global"]
 
     create_session_map(tmp_path, "trial", purpose="messy trial", use=True)
+    r_trial = run_probe(tmp_path, "p", to={"kind": "region"}).get("id")
     create_known(
         tmp_path,
         "k_trial",
         claim="experimental",
         map_type="number",
         quantity="q",
+        run_id=r_trial,
     )
     assert [k["id"] for k in list_knowns(tmp_path)] == ["k_trial"]
     assert knowns_root(tmp_path).as_posix().endswith("sessions/trial/knowns")

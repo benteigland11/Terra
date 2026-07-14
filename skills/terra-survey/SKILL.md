@@ -2,7 +2,7 @@
 name: terra-survey
 description: >
   REQUIRED for Terra map beliefs and evidence: unknown create/link/resolve,
-  known create/link/promote, plan create/link/promote, run void/list, typed
+  unknown graduate (known birth), known link/promote, plan create/link/promote, run void/list, typed
   number|boolean|formula, claim-shaped analysis without freehand, n-ladder /
   promote rules. Fire on fog, "open an unknown", encode a known, formula gate,
   multi-leg plan, void bad run, "looks good after one sample", or asserting
@@ -23,8 +23,9 @@ Instruments: **terra-probe**. Program tasks: **terra-route**.
 3. n=1 cannot promote **high**; failed formula cannot promote as true.  
 4. Claim-shaped work (even closed-form models you wrote): unknown/known + **probe run** + link.  
 5. Bare `python tools/…` is not evidence — `terra probe run`.  
-6. Resolve unknowns only with linked runs.  
-7. Prefer `terra map status` over chat memory.
+6. Resolve unknowns only with linked runs.
+7. Knowns are born only via `unknown graduate` — no run, no known.  
+8. Prefer `terra map status` over chat memory.
 
 ## Survey loop
 
@@ -60,17 +61,18 @@ terra probe run <probe_id> --to '{…}'    # prefer --json for run id
 ```bash
 terra unknown link-run <unknown_id> <run_id>
 terra unknown show <unknown_id>
-terra unknown status <id> resolved       # needs trail
+terra unknown status <id> resolved       # answered, no known needed (needs trail)
 ```
 
 ### 4. Encode known (product will build on it)
 
-```bash
-terra known create <slug> --type number --claim "…" \
-  --quantity <q> --from-run <run_id>
+Knowns are **born only by graduating** an evidence-bearing unknown —
+`terra known create` is retired; no run, no known:
 
-terra known create <slug> --type formula --claim "…" \
-  --expression "…" --var x=<quantity> --from-run <run_id>
+```bash
+terra unknown graduate <unknown_id> [--as <known_slug>]
+# requires: unknown typed + ≥1 live linked run
+# carries type/quantity/expression/runs over; resolves the unknown; known starts low/provisional
 
 terra known link-run <slug> <run_id2>
 terra known promote <slug> med           # blocks if ladder / !holds
@@ -108,8 +110,8 @@ probes → runs → knowns/unknowns (number | boolean | formula)
 ## CLI (beliefs)
 
 ```bash
-terra unknown create | link-probe | link-run | show | status | unlink-run | delete
-terra known create | link-run | promote | show | unlink-run | delete
+terra unknown create | link-probe | link-run | graduate | show | status | unlink-run | delete
+terra known link-run | promote | show | unlink-run | delete   # create retired → graduate
 terra plan create | link-run --leg | promote | show
 terra run list | show | void | delete
 terra map status
