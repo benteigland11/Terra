@@ -23,6 +23,9 @@ CONFIDENCE_SET = frozenset(CONFIDENCE_LEVELS)
 KNOWN_STATUSES = frozenset(
     {"provisional", "active", "contested", "refuted", "superseded"}
 )
+# Tombstoned beliefs: kept as history, refused as a current value by the read
+# path (readings._read_known_here). A soft alternative to destructive delete.
+RETIRED_STATUSES = frozenset({"superseded", "refuted"})
 
 
 # ---------------------------------------------------------------------------

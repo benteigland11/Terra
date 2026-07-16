@@ -243,6 +243,24 @@ deliverable tasks runs it (`--skip-gate "<reason>"` is recorded).
 cycles with ↺) — pure view over deps+staleness+consumers, no new state.
 Tests: `tests/test_readings_staleness_gate.py`, `tests/test_known_graph.py`.
 
+### 12b. known supersede: soft tombstone (retire wrong belief)
+
+`superseded` and `refuted` already existed in `KNOWN_STATUSES`
+(number_type.py) but were INERT - the read path never checked status, so a
+bug-derived value was handed out as current. `RETIRED_STATUSES = {superseded,
+refuted}` + `knowns.supersede_known(reason, superseded_by=None, refuted=False)`
+stamp a `superseded` block and set status. The scream lives in the READ path
+(`readings._read_known_here`, keyed on status, `allow_superseded` escape
+threaded through `read_known`) - NOT in the verb, because `set_known` /
+`set_known_status` can also write those statuses; keying the refusal on status
+closes that back-door. Reads with `--allow-superseded` return the historical
+value tagged `superseded:true` + `superseded_info`. `supersede_known` requires
+a reason and validates `--by` exists + isn't self. Map status:
+`known_retired` (info) short-circuits the debt checks so a deliberately
+retired known doesn't also alarm as unbacked/stale. CLI: `known supersede`,
+`known get --allow-superseded`; `known delete` NOTE now points at supersede as
+the non-destructive path. Tests: `tests/test_known_supersede.py`.
+
 ### 13. Corroboration: two evidence axes
 
 `stats.by_probe` (samples grouped by run probe_id) + `stats.corroboration`

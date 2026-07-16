@@ -1349,17 +1349,54 @@ def cmd_known_get(args: argparse.Namespace) -> int:
             allow_cohort_mismatch=bool(
                 getattr(args, "allow_cohort_mismatch", False)
             ),
+            allow_superseded=bool(getattr(args, "allow_superseded", False)),
             consumer=args.consumer,
             at=getattr(args, "at", None),
         )
     except (ValueError, FileNotFoundError, OSError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
+    if reading.get("superseded"):
+        info = reading.get("superseded_info") or {}
+        print(
+            f"  NOTE: known {args.id} is RETIRED "
+            f"({info.get('reason') or 'no reason'}) - returning a historical "
+            "value only because --allow-superseded was given; do NOT treat "
+            "it as current.",
+            file=sys.stderr,
+        )
     if args.raw:
         print(reading["value"])
         return 0
     print(json.dumps(reading, indent=2, sort_keys=True, default=str))
     return 0
+
+
+def cmd_known_supersede(args: argparse.Namespace) -> int:
+    from .agent_io import emit, error, success
+    from .knowns import supersede_known
+
+    try:
+        root = require_project_root()
+        rec = supersede_known(
+            root,
+            args.id,
+            reason=args.reason,
+            superseded_by=getattr(args, "by", None),
+            refuted=bool(getattr(args, "refuted", False)),
+        )
+    except (ValueError, FileNotFoundError, OSError) as e:
+        return emit(error(str(e), code="known_supersede"))
+    meta = {
+        "surface": "terra.known.supersede",
+        "note": (
+            f"known {args.id} is now {rec.get('status')} - read path refuses "
+            "it as current (--allow-superseded to read the historical value). "
+            "History preserved; consumers/design params break loudly on next "
+            "read, which is the point."
+        ),
+    }
+    return emit(success(rec, meta=meta))
 
 
 def cmd_cohort_create(args: argparse.Namespace) -> int:
@@ -2278,6 +2315,12 @@ def cmd_known_delete(args: argparse.Namespace) -> int:
         print(f"error: {e}", file=sys.stderr)
         return 1
     print(f"deleted known {args.id}  ({path})")
+    if params or consumers:
+        print(
+            "  NOTE: to retire a WRONG belief without destroying its history "
+            "(and without dangling refs), prefer: terra known supersede "
+            f"{args.id} --reason '…' [--by <replacement>]"
+        )
     if params:
         print(
             f"  NOTE: design param(s) {params} still reference this known — "
@@ -3452,6 +3495,13 @@ def build_parser() -> argparse.ArgumentParser:
         "(recorded, not recommended)",
     )
     p_kg.add_argument(
+        "--allow-superseded",
+        dest="allow_superseded",
+        action="store_true",
+        help="Read the historical value of a retired/superseded known "
+        "(loudly flagged; never current truth)",
+    )
+    p_kg.add_argument(
         "--consumer",
         default=None,
         help="Reader identity (default: probe ctx / $TERRA_CONSUMER / tool:argv0)",
@@ -3611,6 +3661,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_kdel.add_argument("id")
     p_kdel.set_defaults(func=cmd_known_delete)
+
+    p_ksup = kn_sub.add_parser(
+        "supersede",
+        help="Retire a wrong belief: keep as history, refuse as current "
+        "(soft tombstone between set and delete)",
+    )
+    p_ksup.add_argument("id")
+    p_ksup.add_argument(
+        "--reason", required=True, help="Why it's retired (recorded)"
+    )
+    p_ksup.add_argument(
+        "--by",
+        default=None,
+        help="Known id that replaces this one (must exist; shown in refusals)",
+    )
+    p_ksup.add_argument(
+        "--refuted",
+        action="store_true",
+        help="Mark refuted (belief was wrong) rather than superseded "
+        "(replaced by a better belief)",
+    )
+    p_ksup.set_defaults(func=cmd_known_supersede)
 
     p_kp = kn_sub.add_parser(
         "promote",

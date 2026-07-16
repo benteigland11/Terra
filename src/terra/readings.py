@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .number_type import CONFIDENCE_SET
+from .number_type import CONFIDENCE_SET, RETIRED_STATUSES
 from .paths import (
     consumer_path,
     ensure_consumers_store,
@@ -140,6 +140,7 @@ def read_known(
     allow_stale: bool = False,
     allow_disagree: bool = False,
     allow_cohort_mismatch: bool = False,
+    allow_superseded: bool = False,
     consumer: str | None = None,
     record: bool = True,
     at: float | None = None,
@@ -171,6 +172,7 @@ def read_known(
             allow_stale=allow_stale,
             allow_disagree=allow_disagree,
             allow_cohort_mismatch=allow_cohort_mismatch,
+            allow_superseded=allow_superseded,
             consumer=consumer,
             record=record,
             at=at,
@@ -189,6 +191,7 @@ def _read_known_here(
     allow_stale: bool,
     allow_disagree: bool,
     allow_cohort_mismatch: bool,
+    allow_superseded: bool,
     consumer: str | None,
     record: bool,
     at: float | None,
@@ -200,6 +203,24 @@ def _read_known_here(
             f"(terra unknown create … && terra unknown graduate …)"
         )
     rec = json.loads(path.read_text(encoding="utf-8"))
+
+    status = str(rec.get("status") or "")
+    if status in RETIRED_STATUSES and not allow_superseded:
+        tomb = rec.get("superseded") or {}
+        by = tomb.get("by")
+        raise ValueError(
+            f"known {known_id} is {status.upper()} - this belief was retired "
+            f"as wrong/replaced ({tomb.get('reason') or 'no reason recorded'}) "
+            "and must NOT be consumed as a current value.\n"
+            + (
+                f"    use the replacement instead: terra known get {by}\n"
+                if by
+                else ""
+            )
+            + f"    inspect the tombstone: terra known show {known_id}\n"
+            f"    override only to read the historical value: "
+            f"terra known get {known_id} --allow-superseded"
+        )
 
     stats = rec.get("stats") or {}
     n = stats.get("n") or 0
@@ -298,6 +319,13 @@ def _read_known_here(
         "uncertainty": corr.get("spread"),
         "band": corr.get("band"),
         **({"cohort": cohort_info} if cohort_info else {}),
+        # Only reachable with allow_superseded=True - flag loudly so a caller
+        # reading a tombstoned value knows it is history, not current truth.
+        **(
+            {"superseded": True, "superseded_info": rec.get("superseded") or {}}
+            if status in RETIRED_STATUSES
+            else {}
+        ),
         "consumer": who,
     }
 
