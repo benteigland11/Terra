@@ -63,7 +63,10 @@ stores). When any peer session shares the project:
 
 - `known get/show` resolve through the chain; the reading carries `"map"`
   (owner) and `"inherited": true` when it came from an ancestor. Consumer
-  edges land on the **owning** map.
+  edges land on the **owning** map. `known get` also SCREAMS on stderr when a
+  value is inherited (reading an ancestor's belief, not a local one) or stale
+  (returned only under `--allow-stale`) - don't consume an inherited/aged
+  number thinking it was fresh and local.
 - A child known with the same id **shadows** the ancestor's for that subtree
   (graduate prints a NOTE). Rename if unintended.
 - Deps (`known depend`) resolve through the chain too; an ancestor dep moving
@@ -89,7 +92,11 @@ stores). When any peer session shares the project:
 2. No auto-merge up the tree; promotion is explicit `known adopt` per
    known/cohort, one hop at a time.
 3. Wrong active map → silent wrong store for **writes** (“not found” on
-   unknowns/runs). Check `map status` / `map list`.
+   unknowns/runs). Check `map status` / `map list`. Every state-changing
+   command now announces its target on stderr (`→ … writes to map 'global'`,
+   or a louder `⚠ … writes to map 'sim_vv' - NOT global` for a session map) -
+   read that line before trusting a create/graduate/link-run/void/delete, and
+   `known delete` prints it BEFORE the destructive act.
 4. `map status` without `--all` still **surfaces attention** across maps; use
    `--map` or `map use` when attention points elsewhere.
 5. Freeze beliefs: either keep on a named session and document it, or adopt
