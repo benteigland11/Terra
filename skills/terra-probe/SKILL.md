@@ -209,6 +209,86 @@ Beliefs → **terra-survey**. Scopes → **terra-scopes**. Route → **terra-rou
 6. Eng packages: probe covers the current claim family.
 
 Stopping at scaffold, validate-only, or “ran the tool outside Terra” = incomplete.
+
+## Prove the input REACHES the output (perturb-and-check)
+
+An error path for BAD input does not prove the probe reads GOOD input. A probe
+that raises on a missing Mach and then solves with a **module-constant** Mach is
+exactly as broken as one with no check at all — loud on garbage, silently deaf
+to everything else. Both of these shipped here: a `ctx["to"]` Mach that never
+reached the heat balance, and a solver-signature flag that proved a process RAN
+while the reported number came from the stub it replaced.
+
+"Prove it can fail" has three levels. Only the third is real:
+1. **Does a check exist?** Weakest. A check that cannot fail is decoration.
+2. **Does the check verify the proposition you NEED?** Provenance-of-EXECUTION
+   ("the solver ran") is NOT provenance-of-VALUE ("this number came from it").
+   Ask of every check: *what does this actually establish?*
+3. **Does the input reach the output? PERTURB AND CHECK.** Move one input by a
+   known amount, predict the output delta from first principles, confirm it
+   lands (`hyd_aux 4kW→6kW` ⇒ `+71.43A @28V`, heat scaling as I² — all three
+   matched). Sweep a condition and confirm the result moves as the physics says
+   — monotonic, right power law. **If nothing moves, the input is decorative and
+   every reading is a property of the code, not the world.**
+
+Pair it with the negative test — bad/missing input ⇒ `status:"error"`, zero
+measures, never a silently substituted default. **Both directions or neither.**
+
+**Two scan rules for reading ANY check's output. Both are the same question:**
+- **A completeness metric at 100% — ask what its DENOMINATOR excludes.** "31/31
+  mating faces" was 100% of *documented* pairs, over a documented set touching
+  30 of 54 parts. "Lumen area correct to <1%" — on a duct whose skin was never
+  breached. "AC corroborated, comfortable margin" — with a −78% hole in the same
+  dataset. Each ratio was true. Each denominator was chosen by someone else.
+  The worst form is an **induction presented as an enumeration**: that pair list
+  generalized "wing ribs mate to spars" from **one representative rib** and
+  emitted the generalization as if it were the list. The remedy is mechanical —
+  **a count that is a literal instead of a measurement is a lie waiting to
+  happen.** Glob the population off disk, report `n_total` / `n_covered` /
+  `n_uncovered`, and **fail below 100% coverage even when every checked item
+  passes.**
+- **A proof that CANNOT FAIL in the regime you care about is not evidence about
+  that regime.** A 2-part assembly proof passing cleanly — real solver, hand-run
+  agreement, can-fail demonstrated — says *nothing* about 30 parts when the
+  suspected failure (many interfaces simultaneously active) is **structurally
+  impossible to exhibit at 2**. That isn't weak evidence about scale; it is **no
+  evidence**. Running it wasn't the error — reading it as reassurance was.
+
+**Their shared spine, and the most useful question in this whole file:**
+> **Ask what the check CANNOT see, not just what it reports.**
+
+Every instrument that lied here was reporting truthfully: a search ceiling
+reported as a flutter margin, a sweep parameter reported as a design property,
+`n_degenerate_facets=0` from a threshold blind to the 32 real ones, a solver
+signature proving a process ran while the number came from the stub it replaced.
+**None of them were wrong. All of them answered a question nobody asked.**
+
+## One quantity name = one condition (`number` knowns POOL; they ignore `x`)
+
+A `number`-typed known **pools every sample under a quantity name as repeat
+measurements of ONE thing — it does NOT read `x`.** `x` only means anything for
+`--type relation`. So emitting the same quantity at two conditions in one run
+silently **averages** them into a value describing no real condition — and it
+graduates and sits in the map looking healthy. (Real case: a Mach-1.29
+afterburning-dash airflow and a Mach-0.90 cruise airflow, same quantity name,
+pooled into one meaningless mean.)
+
+Two honest fixes — pick by **physics, not by looks**:
+- **Put the condition in the quantity NAME** — `total_airflow_ab_dash_kg_s` vs
+  `total_airflow_cruise_kg_s`. Correct whenever the conditions are distinct
+  operating points rather than stations on one curve.
+- **Use `--type relation`** ONLY if the conditions form a continuous schedule
+  **your method actually covers**. A relation draws a curve, and a curve
+  *asserts the regime between its stations*. If the method has no model there
+  (e.g. a max-power-only corrected-flow schedule interrogated at part-power
+  cruise), the curve is prettier and it lies. **Never reach for relation to
+  smooth away a caveat.**
+
+Carry validity WITH the reading: emit the caveat as a **measure/field**
+(`method_valid_max_power: false`), never as prose in a comment someone will
+lose. Same law as the condition basis below — a reading that can't state the
+condition it was taken at is not a reading.
+
 ## Sweep probes (relation knowns)
 
 For `--type relation` knowns, emit (x, y) pairs as measures with an `x`

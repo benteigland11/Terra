@@ -2,7 +2,7 @@
 name: terra-survey
 description: >
   REQUIRED for Terra map beliefs and evidence: unknown create/link/resolve,
-  unknown graduate (known birth), known get/depend/tolerance/reaffirm/link/promote,
+  unknown graduate (known birth), known get/depend/tolerance/reaffirm/supersede/link/promote,
   corroboration (methods agree), cohorts (coupled knowns from one converged
   solve — create/check/link-run fan-out, mixed-set refusals),
   design add/attach/check (stable baseline), gate,
@@ -52,7 +52,33 @@ Instruments: **terra-probe**. Program tasks: **terra-route**.
    `terra known accept-spread <id> --reason "…"` — reads unblock carrying
    `uncertainty`+`band`, confidence caps at med, widening spread re-trips,
    agreement clears. Related-but-distinct quantities are NOT a disagreement;
-   med is their honest ceiling until a real second method exists.  
+   med is their honest ceiling until a real second method exists.
+   **Both methods must be measuring the SAME THING.** Same quantity name is not
+   enough: two instruments running *different models*, or one running outside its
+   valid regime, are not two methods — they are two answers to two questions, and
+   their agreement and their disagreement are **equally meaningless**. Real cases:
+   a corroborator still running the *rejected* model after its partner converted
+   (they'd diverge for a reason unrelated to the axis under test); an unsteady
+   method interrogated at a Mach its aero doesn't cover. **A corroborating
+   instrument measuring something different from its partner is worse than no
+   corroboration** — it manufactures a confidence interval out of a category
+   error. Before linking a second method, state what proposition each one
+   establishes and confirm it is the same proposition.
+   **The inverse costs you too: DIFFERENT names for the SAME proposition
+   silently forfeit corroboration you already earned.** Terra counts methods by
+   **quantity name** — two independent instruments that physically agree to
+   0.03 A but emit `dc_tru_continuous_margin_a` and `tru_continuous_margin_a`
+   register as `methods=1`, and the known is capped at a confidence it has
+   already outgrown. **Name the proposition, not the instrument.** Agree the
+   quantity name across methods BEFORE running them, or you pay for a second
+   method and don't get it.
+   **And a SHARED IMPLEMENTATION is not independent corroboration.** If method B
+   imports method A's function, their agreement is a **tautology** — guaranteed
+   by construction, carrying zero information about the world. That is an
+   integration sanity check, not a second opinion, and it is the purest form of
+   this trap because the numbers match *perfectly*. Before crediting
+   corroboration, ask **what could make these two disagree?** If the honest
+   answer is "nothing, they run the same code," you have one method twice.  
 12. Prefer `terra map status` over chat memory.
 
 ## Survey loop
@@ -126,8 +152,19 @@ terra known depend <slug> --on known:<up> --on file:<relpath>
 terra known graph --human                         # whole chain: which upstream moved
 terra known tree <slug> --human                   # one node up/down + consumers
 terra known reaffirm <slug> --reason "…"          # verified-unchanged only
+terra known supersede <slug> --reason "…" [--by <replacement>] [--refuted]
 terra gate                                        # exit 1 while debt remains
 ```
+
+**Retire a wrong belief - don't delete it.** When a known is bug-derived or
+just wrong, `known supersede` is the soft tombstone: keep it as history,
+refuse it as current. `known set` can't touch a value; `known delete` is
+destructive and leaves dangling consumers/design params. Supersede stamps a
+reason (and optional `--by <replacement>`), sets status `superseded`
+(replaced) or `refuted` (`--refuted`, just wrong), and the read path then
+REFUSES `known get` unless `--allow-superseded` (which returns the historical
+value, loudly flagged). Map status shows it as `known_retired` (info), not
+debt.
 
 ```python
 from terra.readings import known    # in probes/tools — never hardcode a copy
@@ -181,7 +218,7 @@ probes → runs → knowns/unknowns (number | boolean | formula)
 
 ```bash
 terra unknown create | link-probe | link-run | graduate [--with|--into] | show | status | unlink-run | delete
-terra known get | set (metadata: --claim/--notes/--unit; never values) | depend | graph | tree | tolerance | accept-spread | reaffirm | link-run | promote | show | unlink-run | delete
+terra known get | set (metadata: --claim/--notes/--unit; never values) | depend | graph | tree | tolerance | accept-spread | reaffirm | supersede (retire wrong belief) | link-run | promote | show | unlink-run | delete
 terra cohort create | add | list | check | link-run   # coupled sets, fan-out refresh
 terra design add | attach | check | refresh | get | remove | detach
 terra gate       # mechanical debt check (all maps + design)

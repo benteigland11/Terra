@@ -906,6 +906,52 @@ def set_known_status(
     return load_known(project_root, known_id)
 
 
+def supersede_known(
+    project_root: Path,
+    known_id: str,
+    *,
+    reason: str,
+    superseded_by: str | None = None,
+    refuted: bool = False,
+) -> dict[str, Any]:
+    """Retire a known-wrong belief: keep it as history, refuse it as current.
+
+    The soft tombstone between `known set` (metadata only, can't touch a
+    bug-derived value) and `known delete` (destructive, dangling consumers/
+    design params, map-chain ambiguity). Sets status to `refuted` (the belief
+    was wrong) or `superseded` (a better belief replaces it) and stamps a
+    `superseded` block. The read path (`readings.read_known`) then REFUSES to
+    hand the value out as current unless `--allow-superseded`, so a bug-derived
+    number can never silently be consumed again.
+    """
+    if not reason or not str(reason).strip():
+        raise ValueError(
+            "supersede requires --reason (no silent retirement of a belief)"
+        )
+    rec = load_known(project_root, known_id)
+    if superseded_by is not None:
+        by = str(superseded_by).strip()
+        if by:
+            if by == known_id:
+                raise ValueError(
+                    f"known {known_id} cannot supersede itself"
+                )
+            # The replacement must exist so the tombstone points somewhere real.
+            find = load_known(project_root, by)  # raises if missing
+            del find
+        else:
+            superseded_by = None
+    rec["status"] = "refuted" if refuted else "superseded"
+    rec["superseded"] = {
+        "at": _now(),
+        "reason": reason.strip(),
+        "by": superseded_by,
+        "refuted": bool(refuted),
+    }
+    save_known(project_root, rec)
+    return load_known(project_root, known_id)
+
+
 # Freehand --value is the agent footgun that used to look like a silent no-op
 # when agents invented `terra known set` (subcommand missing) + 2>/dev/null.
 _FREEHAND_VALUE_MSG = (

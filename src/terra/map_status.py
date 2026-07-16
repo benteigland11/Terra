@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .knowns import list_knowns
+from .number_type import RETIRED_STATUSES
 from .paths import (
     get_active_map_id,
     list_maps,
@@ -399,6 +400,23 @@ def _derive_agent_guidance(
                 )
 
         for k in scope.get("knowns") or []:
+            if str(k.get("status") or "") in RETIRED_STATUSES:
+                kid = str(k.get("id") or "")
+                attention.append(
+                    attention_item(
+                        "known_retired",
+                        id=kid,
+                        severity="info",
+                        why=(
+                            f"known {kid} on map {mid} is {k.get('status')} "
+                            "(retired belief, kept as history) - read path "
+                            "refuses it as current"
+                        ),
+                        extra={"map_id": mid, "status": k.get("status")},
+                    )
+                )
+                # Deliberately retired: don't also alarm as unbacked/stale/etc.
+                continue
             if k.get("methods_agree") is False:
                 kid = str(k.get("id") or "")
                 if k.get("spread_accepted"):
