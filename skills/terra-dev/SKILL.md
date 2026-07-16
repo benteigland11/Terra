@@ -384,6 +384,23 @@ Artifacts stamp file sha256 + params_at; drift/regen detection in
 map_id="design". `design get` wraps read_known(min_conf=med) on global.
 Tests: `tests/test_design.py`.
 
+### 17b. Gate self-check vs the DoR baseline
+
+A gate (formula known) whose bar the certified-good design-of-record itself
+fails is a bug in the gate, not a wall (Ben's dome acceptance bars measured
+symmetry a master couldn't pass). `design._gate_baseline_notices` builds
+`quantity → accepted value` from number/boolean design params
+(`value_at_admission`, fallback live), scans GLOBAL formula knowns, and for
+each uses `formula_type.extract_thresholds` (var-OP-constant comparisons;
+n()/rate()/std() guards and var-to-var ignored; var-on-right normalized) to
+resolve `var → quantity` via the known's `vars` map. If the baseline value
+does NOT `satisfies_threshold` the bar, it emits a NON-BLOCKING
+`gate_stricter_than_baseline` notice ("your pass threshold is stricter than
+the design of record; intended?"). `check_design` returns it under `notices`
+(+ counts.notices); `check_gate` folds design notices into gate `notices`
+(map_id="design"), never `violations`. Scoped to global formula knowns
+(design is global-sourced). Tests: `tests/test_gate_dor_selfcheck.py`.
+
 ### 18. Budget vs plan vs actual vs sectors
 
 - `brief.budget_points` = authorized total (terra-brief).  

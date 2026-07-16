@@ -234,6 +234,87 @@ def detach_artifact(project_root: Path, path: str) -> None:
     save_design(project_root, design)
 
 
+def _baseline_by_quantity(
+    project_root: Path, design: dict[str, Any]
+) -> dict[str, dict[str, Any]]:
+    """Accepted design-of-record value per measured quantity.
+
+    Maps a known's `quantity` → {param, value, known_id}. `value` is the
+    pinned `value_at_admission` (the DoR of record), falling back to the live
+    value if a param predates the stamp. Formula params carry no scalar
+    quantity and are skipped as baselines.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    for p in design.get("params") or []:
+        kid = p.get("known_id")
+        rec = _load_global_known(project_root, kid)
+        if rec is None or rec.get("type") not in ("number", "boolean"):
+            continue
+        q = rec.get("quantity")
+        if not q:
+            continue
+        val = p.get("value_at_admission")
+        if val is None:
+            from .readings import extract_value
+
+            val = extract_value(rec)
+        if isinstance(val, (int, float)) and not isinstance(val, bool):
+            out[q] = {"param": p.get("name"), "value": float(val), "known_id": kid}
+    return out
+
+
+def _gate_baseline_notices(project_root: Path, design: dict[str, Any]) -> list[dict[str, Any]]:
+    """Warn when a formula gate's threshold is stricter than the DoR baseline.
+
+    A gate (formula known) that the accepted design-of-record itself fails is
+    a bug in the gate, not a wall. For each global formula known, extract its
+    value-threshold comparisons, resolve each var to its measured quantity,
+    and if a design-baseline value for that quantity does NOT satisfy the
+    threshold, emit a non-blocking notice. Self-referential bar-checking:
+    "your pass threshold is stricter than the accepted baseline; intended?"
+    """
+    from .formula_type import extract_thresholds, satisfies_threshold
+    from .knowns import list_knowns
+
+    baseline = _baseline_by_quantity(project_root, design)
+    if not baseline:
+        return []
+    notices: list[dict[str, Any]] = []
+    with scoped_map("global"):
+        knowns = list_knowns(project_root)
+    for k in knowns:
+        rec = k.get("record") or k
+        if rec.get("type") != "formula":
+            continue
+        expr = rec.get("expression")
+        varmap = rec.get("vars") or {}
+        if not expr:
+            continue
+        try:
+            thresholds = extract_thresholds(expr)
+        except ValueError:
+            continue
+        for th in thresholds:
+            q = (varmap.get(th["var"]) or {}).get("quantity")
+            if not q or q not in baseline:
+                continue
+            base = baseline[q]
+            if not satisfies_threshold(base["value"], th["op"], th["bound"]):
+                notices.append({
+                    "kind": "gate_stricter_than_baseline",
+                    "id": rec.get("id"),
+                    "why": (
+                        f"gate {rec.get('id')!r} requires {th['var']} "
+                        f"{th['op_symbol']} {th['bound']}, but the accepted "
+                        f"design baseline {q}={base['value']} (param "
+                        f"{base['param']!r}) does NOT satisfy it - your pass "
+                        f"threshold is stricter than the design of record. "
+                        f"Intended? Loosen the gate, or the DoR is out of spec."
+                    ),
+                })
+    return notices
+
+
 def check_design(project_root: Path) -> dict[str, Any]:
     """Health of every param and artifact — computed now, never stored."""
     design = load_design(project_root)
@@ -304,17 +385,21 @@ def check_design(project_root: Path) -> dict[str, Any]:
                 {"kind": "design_artifact", "id": path, "why": r}
             )
 
+    notices = _gate_baseline_notices(project_root, design)
+
     return {
         "command": "design.check",
         "ok": not violations,
         "params": params_out,
         "artifacts": artifacts_out,
         "violations": violations,
+        "notices": notices,
         "counts": {
             "params": len(params_out),
             "params_red": sum(1 for p in params_out if not p["ok"]),
             "artifacts": len(artifacts_out),
             "artifacts_red": sum(1 for a in artifacts_out if not a["ok"]),
+            "notices": len(notices),
         },
     }
 
