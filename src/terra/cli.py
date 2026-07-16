@@ -1024,6 +1024,7 @@ def cmd_unknown_create(args: argparse.Namespace) -> int:
             "  next: terra probe create <id> --purpose \"…\"  "
             "OR  terra unknown link-probe …"
         )
+    _announce_write_target(root, "unknown create")
     return 0
 
 
@@ -1119,6 +1120,30 @@ def cmd_unknown_show(args: argparse.Namespace) -> int:
     return 0
 
 
+def _announce_write_target(root: Path, what: str) -> None:
+    """Print (to stderr) which map a state-changing command is writing to.
+
+    The map is invisible until you're about to hit the wrong copy (a delete
+    landing on a session map you forgot was active). This makes the write
+    target explicit on every mutation. Louder when the target is NOT global,
+    since a silently-active session/experiment map is the actual footgun.
+    stderr so it never pollutes the JSON envelope on stdout.
+    """
+    from .paths import GLOBAL_MAP_ID, resolve_active_map
+
+    mid, source = resolve_active_map(root)
+    via = f" (via {source})" if source in ("env", "cli") else ""
+    if mid == GLOBAL_MAP_ID:
+        print(f"  → {what} writes to map '{mid}'{via}", file=sys.stderr)
+    else:
+        print(
+            f"  ⚠ {what} writes to map '{mid}'{via} - NOT global. If that is "
+            "not where you meant to write, pin the map: "
+            "terra --map <id> … or export TERRA_MAP=<id>",
+            file=sys.stderr,
+        )
+
+
 def _print_known_summary(prefix: str, rec: dict, path: Path | None = None) -> None:
     st = rec.get("stats") or {}
     print(
@@ -1204,6 +1229,7 @@ def cmd_known_set(args: argparse.Namespace) -> int:
     from .paths import known_path as _known_path
 
     _print_known_summary(action, rec, _known_path(root, args.id))
+    _announce_write_target(root, "known set")
     return 0
 
 
@@ -1380,6 +1406,11 @@ def cmd_known_get(args: argparse.Namespace) -> int:
     except (ValueError, FileNotFoundError, OSError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
+    # Scream when the value is not a clean current local read: retired
+    # (superseded/refuted), inherited (map-chain read-through), or stale
+    # (allowed with --allow-stale) — all were tucked in quiet fields, so
+    # surface them rather than let a tombstoned/inherited/aged number be
+    # consumed as if it were fresh, local, and current.
     if reading.get("superseded"):
         info = reading.get("superseded_info") or {}
         print(
@@ -1387,6 +1418,21 @@ def cmd_known_get(args: argparse.Namespace) -> int:
             f"({info.get('reason') or 'no reason'}) - returning a historical "
             "value only because --allow-superseded was given; do NOT treat "
             "it as current.",
+            file=sys.stderr,
+        )
+    if reading.get("inherited"):
+        print(
+            f"  NOTE: known {args.id} is INHERITED from map "
+            f"'{reading.get('map')}' (not the active map) via the parent "
+            "chain - you are reading an ancestor's belief, not a local one.",
+            file=sys.stderr,
+        )
+    if reading.get("stale"):
+        reasons = "; ".join(reading.get("stale_reasons") or [])
+        print(
+            f"  NOTE: known {args.id} is STALE ({reasons}) - returned only "
+            "because --allow-stale was given; a dependency moved. Re-derive "
+            "or reaffirm before trusting it.",
             file=sys.stderr,
         )
     if args.raw:
@@ -1832,6 +1878,7 @@ def cmd_known_link_run(args: argparse.Namespace) -> int:
             f"{rec.get('confidence_derived')}"
         )
     _note_cohort_and_convergence(root, rec, args.run_id)
+    _announce_write_target(root, "known link-run")
     return 0
 
 
@@ -2032,6 +2079,7 @@ def cmd_unknown_graduate(args: argparse.Namespace) -> int:
     except (ValueError, FileExistsError, FileNotFoundError, OSError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
+    _announce_write_target(root, "unknown graduate")
     if getattr(args, "json", False):
         print(json.dumps(rec, indent=2, default=str))
         return 0
@@ -2138,6 +2186,7 @@ def cmd_unknown_delete(args: argparse.Namespace) -> int:
         print(f"error: {e}", file=sys.stderr)
         return 1
     print(f"deleted unknown {args.id}  ({path})")
+    _announce_write_target(root, "unknown delete")
     return 0
 
 
@@ -2336,6 +2385,9 @@ def cmd_known_delete(args: argparse.Namespace) -> int:
         consumers = [
             c.get("consumer") for c in list_consumers(root, args.id)
         ]
+        # Name the write target BEFORE the destructive act - deleting the
+        # wrong map's copy (a silently-active session map) is the footgun.
+        _announce_write_target(root, "known delete")
         path = delete_known(root, args.id)
     except (FileNotFoundError, OSError) as e:
         print(f"error: {e}", file=sys.stderr)
@@ -2528,6 +2580,9 @@ def cmd_probe_run(args: argparse.Namespace) -> int:
         print(f"error: {e}", file=sys.stderr)
         return 1
 
+    if not args.dry_run:
+        _announce_write_target(root, "probe run")
+
     if args.json:
         out = {k: v for k, v in stamp.items() if not str(k).startswith("_")}
         out["path"] = stamp.get("_path")
@@ -2669,6 +2724,7 @@ def cmd_run_void(args: argparse.Namespace) -> int:
     except (ValueError, FileNotFoundError, OSError, json.JSONDecodeError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
+    _announce_write_target(root, "run void")
     if args.json:
         print(json.dumps(result, indent=2, default=str))
         return 0

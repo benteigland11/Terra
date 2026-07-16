@@ -144,6 +144,23 @@ pointer. Surfaces: `map status` envelope carries `active_map_source` +
 "cli" even when the env is set — tests reset with `set_active_map_id(None)`
 to model a fresh shell. Tests: `tests/test_map_env.py`.
 
+### 2c. Write-target banner + inherited/stale scream on read
+
+The active map was invisible until a write hit the wrong copy (a delete
+landing on a silently-active session map). `cli._announce_write_target(root,
+what)` prints a stderr line naming the target from `resolve_active_map`:
+`→ … writes to map 'global'` (quiet) vs a louder `⚠ … writes to map 'sim_vv'
+- NOT global …` when off-global (the actual footgun). Wired into the
+mutators: unknown create/graduate/delete, known set/link-run/delete, probe
+run (skipped on --dry-run), run void. `known delete` announces BEFORE the
+destructive unlink. stderr so it never pollutes the JSON envelope on stdout;
+banners land on both the `--json` and human return paths. On the read side,
+`cmd_known_get` screams (stderr NOTE) when the reading is `inherited`
+(map-chain read-through from an ancestor) or `stale` (returned under
+--allow-stale) - both were previously tucked in quiet fields.
+Tests: `tests/test_write_target.py`. When adding a new state-changing
+command, call `_announce_write_target` and add a banner test.
+
 ### 3. Scaffold probes validate PASS (now self-announcing)
 
 Bare `terra probe create` scaffolds a dry-friendly stub that **level-1 validates**.  
