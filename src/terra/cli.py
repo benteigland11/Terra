@@ -1710,6 +1710,8 @@ def cmd_design_check(args: argparse.Namespace) -> int:
             print(f"  {mark} {a['path']}  uses={a.get('uses')}")
             for r in a.get("reasons") or []:
                 print(f"      ! {r}")
+        for n in result.get("notices") or []:
+            print(f"  note [{n['kind']}] {n['id']}: {n['why']}")
         return 0 if result["ok"] else 1
     emit(success(result, meta={"surface": "terra.design.check"}))
     return 0 if result["ok"] else 1

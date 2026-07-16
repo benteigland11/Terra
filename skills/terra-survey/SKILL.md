@@ -147,6 +147,14 @@ terra design get <param> --raw            # generators read the design value
 Design is project-wide, sourced from **global** only; params are live links
 (known moves → param red → attached files flagged REGENERATE → gate fails).
 
+**Gate self-check vs the baseline.** `design check` / `terra gate` also warn
+(non-blocking `gate_stricter_than_baseline` notice) when a formula gate's
+threshold is stricter than the accepted design-of-record: if a gate requires
+`sm <= 0.01` but the admitted baseline for `sm` is `0.015`, the bar the
+design of record itself fails is flagged - loosen the gate, or the DoR is out
+of spec. Don't manufacture false walls against a bar your own baseline can't
+pass.
+
 ### 5. Multi-leg → plan
 
 ```bash

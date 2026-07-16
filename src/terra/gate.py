@@ -161,8 +161,13 @@ def check_gate(
     # Design layer is project-wide: red params/artifacts fail release
     from .design import check_design
 
-    for v in check_design(project_root)["violations"]:
+    design_verdict = check_design(project_root)
+    for v in design_verdict["violations"]:
         violations.append({**v, "map_id": "design"})
+    # Non-blocking: a gate stricter than the accepted DoR baseline is a
+    # self-referential warning, not release debt.
+    for n in design_verdict.get("notices") or []:
+        notices.append({**n, "map_id": "design"})
     return {
         "ok": not violations,
         "maps_checked": map_ids,

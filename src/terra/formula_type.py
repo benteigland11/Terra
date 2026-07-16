@@ -154,6 +154,82 @@ def validate_formula_fields(
     return blocks
 
 
+# Op symbol + its mirror (for flipping when the var is on the right side).
+_OP_SYMBOL: dict[type, str] = {
+    ast.Eq: "==", ast.NotEq: "!=", ast.Lt: "<", ast.LtE: "<=",
+    ast.Gt: ">", ast.GtE: ">=",
+}
+_OP_MIRROR: dict[type, type] = {
+    ast.Lt: ast.Gt, ast.Gt: ast.Lt, ast.LtE: ast.GtE, ast.GtE: ast.LtE,
+    ast.Eq: ast.Eq, ast.NotEq: ast.NotEq,
+}
+
+
+def _threshold_operand_var(node: ast.AST) -> str | None:
+    """A bare var, or a value-aggregate over one var (mean/min/max/sum(var)).
+
+    Returns the var name if this operand refers to a single variable's value.
+    n()/rate()/std() are NOT value thresholds (count/spread), so return None.
+    """
+    if isinstance(node, ast.Name):
+        return node.id
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in ("mean", "min", "max", "sum")
+        and len(node.args) == 1
+        and isinstance(node.args[0], ast.Name)
+    ):
+        return node.args[0].id
+    return None
+
+
+def extract_thresholds(expression: str) -> list[dict[str, Any]]:
+    """Pull value-threshold comparisons (var OP constant) out of a formula.
+
+    Used by the design self-check to compare a gate's bar against the accepted
+    baseline. Only comparisons where one side refers to a single var's value
+    and the other is a numeric constant are returned, normalized so the var is
+    on the left: {var, op (ast type), op_symbol, bound}. n()/rate()/std()
+    guards and var-to-var comparisons are ignored (not value bars).
+    """
+    tree = validate_expression_ast(expression)
+    out: list[dict[str, Any]] = []
+
+    def walk(node: ast.AST) -> None:
+        if isinstance(node, ast.Compare) and len(node.ops) == 1:
+            left, op, right = node.left, node.ops[0], node.comparators[0]
+            lvar = _threshold_operand_var(left)
+            rvar = _threshold_operand_var(right)
+            lconst = isinstance(left, ast.Constant) and isinstance(
+                left.value, (int, float)
+            ) and not isinstance(left.value, bool)
+            rconst = isinstance(right, ast.Constant) and isinstance(
+                right.value, (int, float)
+            ) and not isinstance(right.value, bool)
+            if lvar and rconst:
+                out.append({
+                    "var": lvar, "op": type(op),
+                    "op_symbol": _OP_SYMBOL[type(op)], "bound": right.value,
+                })
+            elif rvar and lconst and type(op) in _OP_MIRROR:
+                mop = _OP_MIRROR[type(op)]
+                out.append({
+                    "var": rvar, "op": mop,
+                    "op_symbol": _OP_SYMBOL[mop], "bound": left.value,
+                })
+        for child in ast.iter_child_nodes(node):
+            walk(child)
+
+    walk(tree.body)
+    return out
+
+
+def satisfies_threshold(value: float, op: type, bound: float) -> bool:
+    """Does `value OP bound` hold? (op is an ast comparison type.)"""
+    return bool(_COMP_OPS[op](value, bound))
+
+
 def validate_expression_ast(expression: str) -> ast.Expression:
     try:
         tree = ast.parse(expression, mode="eval")
