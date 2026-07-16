@@ -281,6 +281,27 @@ markdown drive-logs when they couldn't read a chronological story out of
 routes. Keep it stateless — never write log entries as separate state.
 Tests: `tests/test_route_evidence.py` (route_log cases).
 
+### 14e. Route liveness: status is not a heartbeat
+
+`in_progress` is not a liveness signal — a lead that dies mid-task strands
+its route in_progress forever, indistinguishable from active work (this
+caused a real double-writer master-model corruption). Tasks now carry
+`owner_agent` / `started_at` / `last_heartbeat_at` (route.py). `start_task`
+takes `agent=` and stamps all three; `heartbeat_task` refreshes
+`last_heartbeat_at` (and re-asserts owner) and REFUSES on non-in_progress;
+`complete`/`block` null owner+heartbeat (started_at kept as history).
+`route_attention` emits `task_no_heartbeat` (severity high, carries `owner`
++ `hours_since_heartbeat`) when a claimed task's heartbeat exceeds
+`HEARTBEAT_STALE_HOURS = 6`; the day-scale `task_stalled` (updated_at ≥
+`STALL_DAYS`) stays as the legacy backstop. Design invariants:
+heartbeat does NOT touch `status` or task `updated_at` (updated_at tracks
+real status/effort changes, so the 7-day stall check keeps working);
+`task_no_heartbeat` only fires when `last_heartbeat_at` is present, so legacy
+tasks (None) fall back to stall, never spam. Fields are optional + backfilled
+in `load_route` (no schema bump) and type-checked in `validate_route`. CLI:
+`route start --agent`, `route heartbeat <id> [--agent]`.
+Tests: `tests/test_route_liveness.py`.
+
 ### 14c. Convergence + cohorts: coupled solves
 
 `cohorts.py` + convergence block in `probe_run.py`. Two invariants:

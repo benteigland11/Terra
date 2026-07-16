@@ -787,23 +787,47 @@ def cmd_route_start(args: argparse.Namespace) -> int:
 
     try:
         root = require_project_root()
-        t = start_task(root, args.id)
+        t = start_task(root, args.id, agent=getattr(args, "agent", None))
     except (FileNotFoundError, ValueError, OSError) as e:
         return emit(error(str(e), code="route_start"))
     meta: dict[str, Any] = {"surface": "terra.route.start"}
-    from .route import load_route
+    from .route import HEARTBEAT_STALE_HOURS, load_route
 
+    notes: list[str] = []
+    if not t.get("owner_agent"):
+        notes.append(
+            "no --agent given: task is claimed anonymously — pass "
+            "--agent <id> so a stranded lead is attributable"
+        )
+    notes.append(
+        f"send `terra route heartbeat {args.id}` during long silent work; "
+        f"route status flags a missing heartbeat after {HEARTBEAT_STALE_HOURS}h"
+    )
     others = [
         x.get("id")
         for x in load_route(root).get("tasks") or []
         if x.get("status") == "in_progress" and x.get("id") != args.id
     ]
     if others:
-        meta["note"] = (
+        notes.append(
             f"also in_progress: {others} — complete/block before they go "
             f"stale (route status flags >=7d)"
         )
+    if notes:
+        meta["note"] = " | ".join(notes)
     return emit(success(t, meta=meta))
+
+
+def cmd_route_heartbeat(args: argparse.Namespace) -> int:
+    from .agent_io import emit, error, success
+    from .route import heartbeat_task
+
+    try:
+        root = require_project_root()
+        t = heartbeat_task(root, args.id, agent=getattr(args, "agent", None))
+    except (FileNotFoundError, ValueError, OSError) as e:
+        return emit(error(str(e), code="route_heartbeat"))
+    return emit(success(t, meta={"surface": "terra.route.heartbeat"}))
 
 
 def cmd_route_complete(args: argparse.Namespace) -> int:
@@ -4083,7 +4107,24 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_rstt = rt_sub.add_parser("start", help="Mark task in_progress")
     p_rstt.add_argument("id")
+    p_rstt.add_argument(
+        "--agent",
+        default=None,
+        help="Owner id claiming this task (attributes a stranded lead)",
+    )
     p_rstt.set_defaults(func=cmd_route_start)
+
+    p_rhb = rt_sub.add_parser(
+        "heartbeat",
+        help="Refresh an in_progress task's liveness stamp (I'm still alive)",
+    )
+    p_rhb.add_argument("id")
+    p_rhb.add_argument(
+        "--agent",
+        default=None,
+        help="Owner id (re-asserts ownership on the ping)",
+    )
+    p_rhb.set_defaults(func=cmd_route_heartbeat)
 
     p_rc = rt_sub.add_parser(
         "complete",

@@ -200,6 +200,10 @@ def validate_route(data: Any) -> list[str]:
                 blocks.append(
                     f"tasks[{i}].sector_id {sec!r} not in route.sectors"
                 )
+        for field in ("owner_agent", "started_at", "last_heartbeat_at"):
+            val = t.get(field)
+            if val is not None and not isinstance(val, str):
+                blocks.append(f"tasks[{i}].{field} must be a string or null")
     # dep existence
     for t in tasks:
         if not isinstance(t, dict):
@@ -256,6 +260,10 @@ def load_route(project_root: Path) -> dict[str, Any]:
             t["plan_points"] = t.get("points")
         if "plan_bucket" not in t and t.get("bucket") is not None:
             t["plan_bucket"] = t.get("bucket")
+        # legacy: liveness fields default to unclaimed / no heartbeat
+        t.setdefault("owner_agent", None)
+        t.setdefault("started_at", None)
+        t.setdefault("last_heartbeat_at", None)
     blocks = validate_route(data)
     if blocks:
         raise ValueError("invalid route:\n  - " + "\n  - ".join(blocks))
@@ -401,6 +409,11 @@ def add_task(
             "plan_bucket": bkt,
             "plan_points": pts,
             "blocked_reason": None,
+            # Liveness: owner + heartbeat distinguish "working" from "died".
+            # status is NOT a liveness signal — see route_attention.
+            "owner_agent": None,
+            "started_at": None,
+            "last_heartbeat_at": None,
             "evidence": [],
             "created_at": _now(),
             "updated_at": _now(),
@@ -510,7 +523,9 @@ def _get_task(rec: dict[str, Any], task_id: str) -> dict[str, Any]:
     raise FileNotFoundError(f"task not found: {task_id}")
 
 
-def start_task(project_root: Path, task_id: str) -> dict[str, Any]:
+def start_task(
+    project_root: Path, task_id: str, *, agent: str | None = None
+) -> dict[str, Any]:
     rec = load_route(project_root)
     t = _get_task(rec, task_id)
     if t.get("pickable") is False or t.get("waiting_on"):
@@ -521,12 +536,47 @@ def start_task(project_root: Path, task_id: str) -> dict[str, Any]:
         raise ValueError(f"task {task_id} is {t.get('status')}")
     if t.get("status") == "blocked":
         raise ValueError(f"task {task_id} is blocked: {t.get('blocked_reason')}")
+    now = _now()
     for task in rec["tasks"]:
         if task.get("id") == task_id:
             task["status"] = "in_progress"
-            task["updated_at"] = _now()
+            task["updated_at"] = now
+            # Claim ownership + open the heartbeat. A lead that dies mid-task
+            # stops refreshing last_heartbeat_at — route_attention sees it.
+            task["owner_agent"] = (agent or "").strip() or None
+            task["started_at"] = now
+            task["last_heartbeat_at"] = now
             task.pop("waiting_on", None)
             task["pickable"] = False
+    save_route(project_root, rec)
+    return _get_task(load_route(project_root), task_id)
+
+
+def heartbeat_task(
+    project_root: Path, task_id: str, *, agent: str | None = None
+) -> dict[str, Any]:
+    """Refresh an in_progress task's liveness stamp.
+
+    The explicit "I'm still alive" ping. Only meaningful while in_progress —
+    a dead lead simply stops calling this, and the gap becomes visible in
+    route_attention. Does NOT touch status or updated_at (status is not a
+    liveness signal; updated_at tracks real status/effort changes).
+    """
+    rec = load_route(project_root)
+    t = _get_task(rec, task_id)
+    if t.get("status") != "in_progress":
+        raise ValueError(
+            f"task {task_id} is {t.get('status')!r}, not in_progress — "
+            "heartbeat only applies to a task being actively worked "
+            "(terra route start it first)"
+        )
+    now = _now()
+    for task in rec["tasks"]:
+        if task.get("id") == task_id:
+            task["last_heartbeat_at"] = now
+            claim = (agent or "").strip()
+            if claim:
+                task["owner_agent"] = claim
     save_route(project_root, rec)
     return _get_task(load_route(project_root), task_id)
 
@@ -650,6 +700,10 @@ def complete_task(
             t["status"] = "done"
             t["updated_at"] = _now()
             t["blocked_reason"] = None
+            # No longer being worked — drop the live heartbeat (keep
+            # started_at as history). A done task must never read as "alive."
+            t["owner_agent"] = None
+            t["last_heartbeat_at"] = None
             t.pop("waiting_on", None)
             entry: dict[str, Any] = {"at": _now()}
             if evidence:
@@ -683,6 +737,9 @@ def block_task(
             task["status"] = "blocked"
             task["blocked_reason"] = reason.strip()
             task["updated_at"] = _now()
+            # Not being actively worked while blocked — stop the heartbeat.
+            task["owner_agent"] = None
+            task["last_heartbeat_at"] = None
     save_route(project_root, rec)
     return _get_task(load_route(project_root), task_id)
 
@@ -1075,10 +1132,29 @@ def budget_rollup(project_root: Path, tasks: list[dict[str, Any]]) -> dict[str, 
 
 
 STALL_DAYS = 7
+# Liveness window: an in_progress task whose owner has not sent a heartbeat
+# within this many hours is presumed possibly-dead. Deliberately short — the
+# whole point is to catch a stranded lead FAST, before someone infers
+# liveness from status and re-dispatches into a double-writer collision.
+HEARTBEAT_STALE_HOURS = 6
+
+
+def _parse_iso(raw: Any) -> "datetime | None":
+    from datetime import datetime
+
+    try:
+        return datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
 
 
 def route_attention(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Aging debt on the route: stalled in-progress work, standing blocks."""
+    """Aging debt on the route: dead/stalled in-progress work, standing blocks.
+
+    Liveness is NOT the status field. An in_progress task with a fresh
+    heartbeat is alive; one whose heartbeat has gone quiet may be a stranded
+    or dead lead — surfaced distinctly so it is never mistaken for active work.
+    """
     from datetime import datetime, timezone
 
     items: list[dict[str, Any]] = []
@@ -1095,23 +1171,42 @@ def route_attention(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 }
             )
         elif st == "in_progress":
-            raw = t.get("updated_at")
-            try:
-                touched = datetime.fromisoformat(
-                    str(raw).replace("Z", "+00:00")
-                )
-                age_days = (now - touched).days
-            except (ValueError, TypeError):
-                continue
-            if age_days >= STALL_DAYS:
+            owner = t.get("owner_agent")
+            # Heartbeat liveness — only for tasks claimed under the new
+            # machinery (last_heartbeat_at present). Legacy tasks have none
+            # and fall back to the day-scale stall check below.
+            hb = _parse_iso(t.get("last_heartbeat_at"))
+            if hb is not None:
+                hb_age_h = (now - hb).total_seconds() / 3600.0
+                if hb_age_h >= HEARTBEAT_STALE_HOURS:
+                    items.append(
+                        {
+                            "kind": "task_no_heartbeat",
+                            "id": t.get("id"),
+                            "owner": owner,
+                            "severity": "high",
+                            "hours_since_heartbeat": round(hb_age_h, 1),
+                            "why": (
+                                f"owner {owner!r} last heartbeat "
+                                f"{int(hb_age_h)}h ago — lead may have died "
+                                "mid-task. VERIFY it is not still running "
+                                "before touching its work; do NOT infer "
+                                "liveness from in_progress status and "
+                                "re-dispatch (that is how the double-writer "
+                                "corruption happened)."
+                            ),
+                        }
+                    )
+            touched = _parse_iso(t.get("updated_at"))
+            if touched is not None and (now - touched).days >= STALL_DAYS:
                 items.append(
                     {
                         "kind": "task_stalled",
                         "id": t.get("id"),
                         "severity": "high",
                         "why": (
-                            f"in_progress untouched for {age_days}d — "
-                            f"complete/block it or split the work"
+                            f"in_progress untouched for {(now - touched).days}d "
+                            "— complete/block it or split the work"
                         ),
                     }
                 )
