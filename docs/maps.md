@@ -29,7 +29,14 @@ terra --map night_census known list
 terra --map night_census probe run mobs --to '{"kind":"region"}'
 ```
 
-Also: env `TERRA_MAP=night_census`.
+Also: env `TERRA_MAP=night_census` pins the map for a whole shell — the
+right tool when concurrent sessions share one project, since the active-map
+pointer is a single shared file and `map use` is last-writer-wins.
+
+Precedence: `--map` flag > `TERRA_MAP` > `.terra/active_map` > `global`.
+`map status` reports `active_map_source` and raises `active_map_missing`
+attention when the pinned map doesn't exist; `map use` under `TERRA_MAP`
+prints a NOTE (the env keeps winning).
 
 Active map file: `.terra/active_map` (single line id).
 

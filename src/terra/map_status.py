@@ -83,9 +83,12 @@ def collect_map_status(
         runs = list_runs(project_root)
         suites = list_suites(project_root)
         belief = str(map_root(project_root))
+        from .cohorts import cohort_violations, list_cohorts
         from .staleness import compute_staleness
 
         stale_map = compute_staleness(project_root)
+        cohorts = list_cohorts(project_root)
+        cohort_viols = cohort_violations(project_root)
 
     open_unk = []
     blocking = []
@@ -143,7 +146,10 @@ def collect_map_status(
             "runs": len(runs),
             "runs_voided": len(voided_runs),
             "suites": len(suites),
+            "cohorts": len(cohorts),
+            "cohorts_inconsistent": len(cohort_viols),
         },
+        "cohort_violations": cohort_viols,
         "probes": probes,
         "unknowns_open": [
             {
@@ -253,7 +259,9 @@ def collect_status_board(
     cannot hide session work (agent DX).
     """
     maps_meta = list_maps(project_root)
-    active = get_active_map_id(project_root)
+    from .paths import resolve_active_map
+
+    active, active_source = resolve_active_map(project_root)
     all_ids = [m["id"] for m in maps_meta]
     if not all_ids:
         all_ids = [active]
@@ -274,6 +282,7 @@ def collect_status_board(
         "command": "map.status",
         "project_root": str(project_root),
         "active_map": active,
+        "active_map_source": active_source,
         "generated_at": datetime.now(timezone.utc)
         .replace(microsecond=0)
         .isoformat()
@@ -285,6 +294,20 @@ def collect_status_board(
     }
     guidance_board = {**board, "scopes": all_scopes}
     attention, next_actions = _derive_agent_guidance(guidance_board)
+    if maps_meta and active not in {m["id"] for m in maps_meta}:
+        attention.insert(
+            0,
+            {
+                "kind": "active_map_missing",
+                "map_id": active,
+                "severity": "high",
+                "detail": (
+                    f"active map '{active}' (source: {active_source}) has no "
+                    "map metadata — writes would land in a store no one reads. "
+                    "Fix TERRA_MAP / .terra/active_map or terra map create."
+                ),
+            },
+        )
     board["attention"] = attention
     board["next_actions"] = next_actions
     board["maps_with_attention"] = sorted(
@@ -462,6 +485,28 @@ def _derive_agent_guidance(
                 )
             )
 
+        for cv in scope.get("cohort_violations") or []:
+            cid = str(cv.get("id") or "")
+            attention.append(
+                attention_item(
+                    "cohort_inconsistent",
+                    id=cid,
+                    severity="high",
+                    why=cv.get("why")
+                    or f"cohort {cid} on map {mid}: members cite different solves",
+                    extra={"map_id": mid, "members": cv.get("members")},
+                )
+            )
+            next_actions.append(
+                action(
+                    "cohort.link-run",
+                    ["terra", *map_flag, "cohort", "link-run", cid, "<run_id>"],
+                    why="one re-solve refreshes the whole coupled set",
+                    priority=12,
+                    map_id=mid,
+                )
+            )
+
         for r in scope.get("runs_recent") or []:
             if not r.get("voided"):
                 continue
@@ -558,7 +603,9 @@ def agent_status_response(board: dict[str, Any]) -> dict[str, Any]:
 
 def format_status_text(board: dict[str, Any]) -> str:
     lines: list[str] = []
-    lines.append(f"Terra map status  active={board.get('active_map')}")
+    src = board.get("active_map_source")
+    src_tag = f" (via {src})" if src in ("env", "cli") else ""
+    lines.append(f"Terra map status  active={board.get('active_map')}{src_tag}")
     lines.append(f"  project: {board.get('project_root')}")
     lines.append(f"  at: {board.get('generated_at')}")
     maps = board.get("maps") or []

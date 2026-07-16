@@ -25,7 +25,15 @@ from .number_type import (
     empty_stats,
     recompute_typed_node,
 )
-from .paths import ensure_knowns_store, known_path, knowns_root, run_dir
+from .paths import (
+    ensure_knowns_store,
+    known_path,
+    knowns_root,
+    map_chain,
+    map_parent,
+    run_dir,
+    scoped_map,
+)
 from .probe_run import RUN_META_NAME
 
 _SLUG_RE = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -353,6 +361,7 @@ def graduate_unknown(
     into: str | None = None,
     notes: str | None = None,
     force: bool = False,
+    cohort_id: str | None = None,
 ) -> dict[str, Any]:
     """Graduate unknown(s) into a known — the only birth path.
 
@@ -473,6 +482,17 @@ def graduate_unknown(
         unk["status"] = "resolved"
         unk["resolved_by"] = f"known:{kid}"
         save_unknown(project_root, unk)
+
+    if cohort_id:
+        # Coupled births: join the cohort (created on first member)
+        from .cohorts import add_member, create_cohort
+        from .paths import cohort_path
+
+        if cohort_path(project_root, cohort_id).is_file():
+            add_member(project_root, cohort_id, kid)
+        else:
+            create_cohort(project_root, cohort_id, members=[kid])
+
     return load_known(project_root, kid)
 
 
@@ -481,6 +501,48 @@ def load_known(project_root: Path, known_id: str) -> dict[str, Any]:
     if not path.is_file():
         raise FileNotFoundError(f"known not found: {known_id}")
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def find_known_map(
+    project_root: Path, known_id: str, map_id: str | None = None
+) -> str | None:
+    """Owning map for a known, walking the parent chain child-first."""
+    for mid in map_chain(project_root, map_id):
+        with scoped_map(mid):
+            if known_path(project_root, known_id).is_file():
+                return mid
+    return None
+
+
+def load_known_chain(
+    project_root: Path, known_id: str
+) -> tuple[dict[str, Any], str]:
+    """Load a known through the parent chain → (record, owning map id)."""
+    owner = find_known_map(project_root, known_id)
+    if owner is None:
+        raise FileNotFoundError(
+            f"known not found: {known_id} (searched map chain "
+            f"{' -> '.join(map_chain(project_root))})"
+        )
+    with scoped_map(owner):
+        return load_known(project_root, known_id), owner
+
+
+def shadowed_ancestor(
+    project_root: Path, known_id: str, map_id: str | None = None
+) -> str | None:
+    """Map id of an ancestor whose known this map's shadows, else None."""
+    chain = map_chain(project_root, map_id)
+    if not chain:
+        return None
+    with scoped_map(chain[0]):
+        if not known_path(project_root, known_id).is_file():
+            return None
+    for mid in chain[1:]:
+        with scoped_map(mid):
+            if known_path(project_root, known_id).is_file():
+                return mid
+    return None
 
 
 def save_known(project_root: Path, record: dict[str, Any]) -> Path:
@@ -519,6 +581,14 @@ def link_run_known(
             raise ValueError(
                 f"run {run_id} is voided — cannot link "
                 f"(terra run unvoid, or use another run)"
+            )
+        conv = meta.get("convergence")
+        if isinstance(conv, dict) and not conv.get("converged"):
+            raise ValueError(
+                f"run {run_id} did not converge (residual="
+                f"{conv.get('residual')!r} vs tol={conv.get('tol')!r}) — "
+                f"an unsettled iterate is not evidence; fix the solve and "
+                f"re-run the probe"
             )
         pid = meta.get("probe_id")
         if isinstance(pid, str) and pid.strip():
@@ -595,6 +665,129 @@ def promote_known(
     return load_known(project_root, known_id)
 
 
+ADOPTION_MIN_CONF = "med"
+
+
+def _adoption_problems(
+    project_root: Path, known_id: str, rec: dict[str, Any]
+) -> list[str]:
+    """Admission bar at the map border — same spirit as design admission."""
+    from .staleness import compute_staleness
+
+    problems: list[str] = []
+    stats = rec.get("stats") or {}
+    if not (rec.get("run_ids") or []) or not (stats.get("n") or 0):
+        problems.append(f"known {known_id} is unbacked (n=0)")
+    conf = str(rec.get("confidence") or "low")
+    rank = {"low": 0, "med": 1, "high": 2}
+    if rank.get(conf, 0) < rank[ADOPTION_MIN_CONF]:
+        problems.append(
+            f"known {known_id} is confidence={conf}, adoption needs "
+            f">= {ADOPTION_MIN_CONF} (link more runs + promote)"
+        )
+    corr = stats.get("corroboration") or {}
+    if corr.get("agree") is False and corr.get("accepted") is not True:
+        problems.append(
+            f"known {known_id}: methods disagree — resolve before adopting"
+        )
+    info = compute_staleness(project_root).get(known_id) or {}
+    if info.get("stale"):
+        problems.append(
+            f"known {known_id} is stale: " + "; ".join(info.get("reasons") or [])
+        )
+    return problems
+
+
+def adopt_known(
+    project_root: Path,
+    known_id: str,
+    *,
+    from_map: str,
+    _cohort_ok: bool = False,
+) -> dict[str, Any]:
+    """Promote a known one hop up the map tree (child → its parent map).
+
+    Copies the record plus its live run directories; stamps provenance
+    (``adopted_from`` / ``adopted_to``). Admission bar re-checked at the
+    border; deps must already resolve from the destination map.
+    """
+    import shutil
+
+    to_map = map_parent(project_root, from_map)
+    if to_map is None:
+        raise ValueError(
+            "cannot adopt from 'global' — it has no parent (global is the top)"
+        )
+
+    with scoped_map(from_map):
+        rec = load_known(project_root, known_id)  # loud if missing
+        problems = _adoption_problems(project_root, known_id, rec)
+        if problems:
+            raise ValueError(
+                f"adoption refused ({from_map} -> {to_map}):\n  - "
+                + "\n  - ".join(problems)
+            )
+        from .cohorts import find_cohort_for
+
+        cohort = find_cohort_for(project_root, known_id)
+        if cohort is not None and not _cohort_ok:
+            raise ValueError(
+                f"known {known_id} is a member of cohort {cohort['id']!r} — "
+                f"coupled knowns adopt as a set:\n"
+                f"    terra cohort adopt {cohort['id']} --from {from_map}"
+            )
+        live = _live_runs(project_root, list(rec.get("run_ids") or []))
+        src_runs = {rid: run_dir(project_root, rid) for rid in live}
+
+    # Deps must resolve from the destination chain
+    missing = [
+        d.get("id")
+        for d in (rec.get("deps") or {}).get("knowns") or []
+        if find_known_map(project_root, str(d.get("id") or ""), to_map) is None
+    ]
+    if missing:
+        raise ValueError(
+            f"adoption refused: deps not resolvable from {to_map!r}: "
+            f"{missing} — adopt the dependency chain bottom-up first:\n"
+            + "\n".join(
+                f"    terra known adopt {m} --from {from_map}" for m in missing
+            )
+        )
+
+    with scoped_map(to_map):
+        if known_path(project_root, known_id).is_file():
+            raise FileExistsError(
+                f"known {known_id} already exists on {to_map!r} — merge new "
+                f"evidence there instead (terra unknown graduate --into "
+                f"{known_id}), or rename before adopting"
+            )
+        for rid, src in src_runs.items():
+            dst = run_dir(project_root, rid)
+            if not dst.exists():
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(src, dst)
+        adopted = dict(rec)
+        adopted["run_ids"] = live
+        adopted["adopted_from"] = {
+            "map": from_map,
+            "known_id": known_id,
+            "at": _now(),
+        }
+        if adopted.get("deps"):
+            from .staleness import stamp_deps
+
+            stamp_deps(project_root, adopted)
+        save_known(project_root, adopted)
+
+    with scoped_map(from_map):
+        src_rec = load_known(project_root, known_id)
+        src_rec["adopted_to"] = {"map": to_map, "at": _now()}
+        save_known(project_root, src_rec)
+
+    with scoped_map(to_map):
+        return load_known(project_root, known_id)
+
+
 def add_dependency(
     project_root: Path, known_id: str, dep_specs: list[str]
 ) -> dict[str, Any]:
@@ -608,8 +801,11 @@ def add_dependency(
         if kind == DEP_KIND_KNOWN:
             if target == known_id:
                 raise ValueError(f"known {known_id} cannot depend on itself")
-            if not (knowns_root(project_root) / f"{target}.json").is_file():
-                raise FileNotFoundError(f"known dep not found: {target}")
+            if find_known_map(project_root, target) is None:
+                raise FileNotFoundError(
+                    f"known dep not found: {target} (searched the map "
+                    f"parent chain)"
+                )
             rows = deps.setdefault("knowns", [])
             if not any(r.get("id") == target for r in rows):
                 rows.append({"id": target, "as_of": None})

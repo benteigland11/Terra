@@ -246,6 +246,14 @@ def link_run(
                 f"run {run_id} is voided — cannot link "
                 f"(terra run unvoid, or use another run)"
             )
+        _conv_chk = _meta_chk.get("convergence")
+        if isinstance(_conv_chk, dict) and not _conv_chk.get("converged"):
+            raise ValueError(
+                f"run {run_id} did not converge (residual="
+                f"{_conv_chk.get('residual')!r} vs tol="
+                f"{_conv_chk.get('tol')!r}) — an unsettled iterate is not "
+                f"evidence; fix the solve and re-run the probe"
+            )
     except ValueError:
         raise
     except (json.JSONDecodeError, OSError):

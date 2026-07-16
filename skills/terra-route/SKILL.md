@@ -2,9 +2,10 @@
 name: terra-route
 description: >
   REQUIRED when walking or expanding the Terra task DAG: route next/status/add/
-  start/complete/block, lead-agent loop, off-graph work, claim-shaped complete
+  start/complete/block/log, lead-agent loop, off-graph work, claim-shaped complete
   evidence (run_id/known_id), skill tags (tooling/deliverable/terra-map/…). Fire
   on "what's next", "add a task", "complete this task", "route is stuck",
+  "what happened today", the urge to keep a shadow md progress log,
   subagent task handoff, or finishing work without route complete. Does NOT
   fire for brief field edits alone (terra-brief), unknown/known/plan authoring
   (terra-survey), or init (terra-start).
@@ -32,7 +33,14 @@ terra route next
 ```bash
 terra route status            # counts + next + blocked
 terra route status --human
+terra route log --human       # chronological history: completions + evidence + blocks
+terra route log --limit 20    # last N events (JSON envelope by default)
 ```
+
+**Routes ARE the record.** Do not keep a shadow markdown log/tracker of
+what happened — `route complete --evidence/--run/--known` is the write,
+`terra route log` is the read. Cross-route synthesis is a report
+deliverable, not a parallel tracker file.
 
 ## Expand the route (required when work appears)
 

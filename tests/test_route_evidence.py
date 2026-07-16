@@ -123,3 +123,49 @@ def test_route_attention_blocked_and_stalled(proj):
     kinds = {(a["kind"], a["id"]) for a in st["attention"]}
     assert ("task_stalled", "old") in kinds
     assert ("task_blocked", "stuck") in kinds
+
+
+def test_route_log_chronological_with_evidence(proj):
+    from terra.route import block_task, route_log
+
+    add_task(proj, "a", title="First", skill="terra-map", bucket="low")
+    add_task(proj, "b", title="Second", skill="any", bucket="low")
+    add_task(proj, "c", title="Stuck", skill="any", bucket="low")
+    start_task(proj, "a")
+    rid = _run(proj)
+    complete_task(proj, "a", evidence="measured q", run_ids=[rid])
+    start_task(proj, "b")
+    complete_task(proj, "b", evidence="wired up")
+    block_task(proj, "c", reason="waiting on parts")
+
+    out = route_log(proj)
+    assert out["command"] == "route.log"
+    assert out["counts"]["events"] == 3
+    kinds = [(e["task"], e["kind"]) for e in out["events"]]
+    assert ("a", "complete") in kinds
+    assert ("b", "complete") in kinds
+    assert ("c", "blocked") in kinds
+    # chronological ascending
+    ats = [e["at"] for e in out["events"]]
+    assert ats == sorted(ats)
+    ev_a = next(e for e in out["events"] if e["task"] == "a")
+    assert ev_a["runs"] == [rid]
+    assert ev_a["note"] == "measured q"
+    blocked = next(e for e in out["events"] if e["task"] == "c")
+    assert blocked["reason"] == "waiting on parts"
+
+    limited = route_log(proj, limit=1)
+    assert limited["counts"]["shown"] == 1
+    assert limited["counts"]["events"] == 3
+
+
+def test_route_log_done_without_evidence_still_logged(proj):
+    add_task(proj, "bare", title="Bare", skill="any", bucket="low")
+    start_task(proj, "bare")
+    complete_task(proj, "bare")
+    from terra.route import route_log
+
+    out = route_log(proj)
+    assert [e["task"] for e in out["events"]] == ["bare"]
+    assert out["events"][0]["kind"] == "complete"
+    assert "note" not in out["events"][0]

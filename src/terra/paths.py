@@ -85,22 +85,31 @@ def scoped_map(map_id: str):
 
 def get_active_map_id(project_root: Path | None = None) -> str:
     """Resolve active map: CLI context → TERRA_MAP env → .terra/active_map → global."""
+    return resolve_active_map(project_root)[0]
+
+
+def resolve_active_map(project_root: Path | None = None) -> tuple[str, str]:
+    """Resolve active map and where it came from.
+
+    Returns (map_id, source) with source in {"cli", "env", "file", "default"}.
+    Precedence: CLI --map context → TERRA_MAP env → .terra/active_map → global.
+    """
     override = _active_map_id.get()
     if override:
-        return _normalize_map_id(override)
+        return _normalize_map_id(override), "cli"
     env = os.environ.get("TERRA_MAP", "").strip()
     if env:
-        return _normalize_map_id(env)
+        return _normalize_map_id(env), "env"
     if project_root is not None:
         active_file = terra_root(project_root) / ACTIVE_MAP_FILENAME
         if active_file.is_file():
             try:
                 text = active_file.read_text(encoding="utf-8").strip()
                 if text:
-                    return _normalize_map_id(text.splitlines()[0].strip())
+                    return _normalize_map_id(text.splitlines()[0].strip()), "file"
             except OSError:
                 pass
-    return GLOBAL_MAP_ID
+    return GLOBAL_MAP_ID, "default"
 
 
 def _normalize_map_id(map_id: str) -> str:
@@ -159,6 +168,21 @@ def knowns_root(project_root: Path) -> Path:
 
 def known_path(project_root: Path, known_id: str) -> Path:
     return knowns_root(project_root) / f"{known_id}.json"
+
+
+def cohorts_root(project_root: Path) -> Path:
+    """Coupled-known sets (map-scoped, like knowns)."""
+    return map_root(project_root) / "cohorts"
+
+
+def cohort_path(project_root: Path, cohort_id: str) -> Path:
+    return cohorts_root(project_root) / f"{cohort_id}.json"
+
+
+def ensure_cohorts_store(project_root: Path) -> Path:
+    root = cohorts_root(project_root)
+    root.mkdir(parents=True, exist_ok=True)
+    return root
 
 
 def consumers_root(project_root: Path) -> Path:
@@ -340,7 +364,7 @@ def _now() -> str:
 
 
 def _write_map_meta(
-    project_root: Path, map_id: str, *, purpose: str
+    project_root: Path, map_id: str, *, purpose: str, parent: str | None = None
 ) -> Path:
     root = map_root(project_root, map_id)
     root.mkdir(parents=True, exist_ok=True)
@@ -353,9 +377,46 @@ def _write_map_meta(
         "created_at": _now(),
     }
     if map_id != GLOBAL_MAP_ID:
-        data["parent"] = GLOBAL_MAP_ID
+        data["parent"] = parent or GLOBAL_MAP_ID
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return path
+
+
+def _read_map_meta(project_root: Path, map_id: str) -> dict[str, Any]:
+    path = map_root(project_root, map_id) / MAP_META_NAME
+    if not path.is_file():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def map_parent(project_root: Path, map_id: str) -> str | None:
+    """Parent map id (None for global). Sessions default to global."""
+    mid = _normalize_map_id(map_id)
+    if mid == GLOBAL_MAP_ID:
+        return None
+    parent = str(_read_map_meta(project_root, mid).get("parent") or GLOBAL_MAP_ID)
+    return _normalize_map_id(parent)
+
+
+def map_chain(project_root: Path, map_id: str | None = None) -> list[str]:
+    """Map ids from the given (or active) map up to global, inclusive.
+
+    Reads resolve child-first along this chain; a child known shadows an
+    ancestor's with the same id. Loud on parent cycles.
+    """
+    mid = _normalize_map_id(map_id) if map_id else get_active_map_id(project_root)
+    chain: list[str] = []
+    while mid is not None:
+        if mid in chain:
+            raise ValueError(
+                f"map parent cycle detected: {' -> '.join([*chain, mid])}"
+            )
+        chain.append(mid)
+        mid = map_parent(project_root, mid)
+    return chain
 
 
 def create_session_map(
@@ -365,11 +426,22 @@ def create_session_map(
     purpose: str = "",
     use: bool = False,
     force: bool = False,
+    parent: str | None = None,
 ) -> Path:
     """Create an experiment-scoped map under sessions/<id>/."""
     mid = _normalize_map_id(map_id)
     if mid == GLOBAL_MAP_ID:
         raise ValueError("cannot create map id 'global' — it always exists")
+    parent_id = _normalize_map_id(parent) if parent else GLOBAL_MAP_ID
+    if parent_id == mid:
+        raise ValueError(f"map {mid!r} cannot be its own parent")
+    if parent_id != GLOBAL_MAP_ID:
+        proot = sessions_root(project_root) / parent_id
+        if not (proot / MAP_META_NAME).is_file():
+            raise FileNotFoundError(
+                f"parent map {parent_id!r} not found — "
+                f"terra map create {parent_id}"
+            )
     ensure_probes_store(project_root)
     ensure_map_lib(project_root)
     root = sessions_root(project_root) / mid
@@ -384,6 +456,7 @@ def create_session_map(
             project_root,
             mid,
             purpose=(purpose or f"Experiment map {mid}").strip(),
+            parent=parent_id,
         )
     finally:
         _active_map_id.set(prev)
@@ -438,12 +511,13 @@ def list_maps(project_root: Path) -> list[dict[str, Any]]:
             if child.name.startswith("."):
                 continue
             purpose = ""
+            parent = GLOBAL_MAP_ID
             meta = child / MAP_META_NAME
             if meta.is_file():
                 try:
-                    purpose = json.loads(meta.read_text(encoding="utf-8")).get(
-                        "purpose", ""
-                    )
+                    data = json.loads(meta.read_text(encoding="utf-8"))
+                    purpose = data.get("purpose", "")
+                    parent = str(data.get("parent") or GLOBAL_MAP_ID)
                 except (json.JSONDecodeError, OSError):
                     pass
             rows.append(
@@ -452,6 +526,7 @@ def list_maps(project_root: Path) -> list[dict[str, Any]]:
                     "kind": "session",
                     "active": active == child.name,
                     "purpose": purpose,
+                    "parent": parent,
                     "path": str(child),
                 }
             )

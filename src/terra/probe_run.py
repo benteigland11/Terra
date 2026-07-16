@@ -301,6 +301,17 @@ def run_probe(
         "duration_s": ctx.get("duration_s"),
         "map_id": get_active_map_id(project_root),
     }
+    # Iterative solvers: probe runs the loop internally and reports the
+    # settled value. The solve is the sample — iterates never stamp runs.
+    conv = raw.get("convergence")
+    if isinstance(conv, dict):
+        stamp_doc["convergence"] = {
+            "converged": bool(conv.get("converged")),
+            "iterations": conv.get("iterations"),
+            "residual": conv.get("residual"),
+            "tol": conv.get("tol"),
+            "criterion": conv.get("criterion"),
+        }
 
     warnings: list[str] = []
     to_warns: list[str] = []
@@ -312,6 +323,17 @@ def run_probe(
         status_warns.extend(warn_status_vocab(stamp_doc.get("status"), live=True))
         warnings.extend(to_warns)
         warnings.extend(status_warns)
+    if (
+        not dry_run
+        and isinstance(stamp_doc.get("convergence"), dict)
+        and not stamp_doc["convergence"]["converged"]
+    ):
+        warnings.append(
+            f"solver did NOT converge (residual="
+            f"{stamp_doc['convergence'].get('residual')!r} vs tol="
+            f"{stamp_doc['convergence'].get('tol')!r}) — this run cannot be "
+            "linked as evidence; an unsettled iterate is not a value"
+        )
     if not artifacts and not dry_run:
         warnings.append(
             "run produced zero artifacts — evidence may be thin "

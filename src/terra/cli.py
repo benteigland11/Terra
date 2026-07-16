@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -164,13 +165,20 @@ def cmd_map_create(args: argparse.Namespace) -> int:
             purpose=args.purpose or "",
             use=bool(args.use),
             force=bool(args.force),
+            parent=getattr(args, "parent", None),
         )
     except (ValueError, FileExistsError, FileNotFoundError, OSError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
     if created:
         print(f"initialized {root / '.terra' / 'map'}")
-    print(f"created map {args.id}  (session)")
+    parent = getattr(args, "parent", None) or "global"
+    print(f"created map {args.id}  (session, parent={parent})")
+    if parent != "global":
+        print(
+            f"  reads fall through {args.id} -> {parent} -> … -> global; "
+            f"promote up with: terra known adopt <id> --from {args.id}"
+        )
     print(f"  {path}")
     print("  probes/lib stay global; unknowns/knowns/runs/suites are scoped here")
     if args.use:
@@ -194,13 +202,34 @@ def cmd_map_list(args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps(rows, indent=2, default=str))
         return 0
+    children: dict[str, list[dict]] = {}
     for r in rows:
+        if r.get("kind") == "session":
+            children.setdefault(r.get("parent") or "global", []).append(r)
+
+    visited: set[str] = set()
+
+    def _emit(r: dict, depth: int) -> None:
+        visited.add(r.get("id"))
         star = "*" if r.get("active") else " "
+        indent = "  " * depth
         print(
-            f"{star} [{r.get('kind')}] {r.get('id')}  "
+            f"{star} {indent}[{r.get('kind')}] {r.get('id')}  "
             f"{r.get('purpose') or ''}"
         )
-    print(f"active: {get_active_map_id(root)}")
+        for c in children.get(r.get("id"), []):
+            _emit(c, depth + 1)
+
+    _emit(rows[0], 0)
+    # orphans (parent map deleted by hand, or a cycle) still listed, loudly
+    for r in rows[1:]:
+        if r.get("id") not in visited:
+            print(f"! [orphan] {r.get('id')}  parent {r.get('parent')!r} unreachable")
+    from .paths import resolve_active_map
+
+    mid, source = resolve_active_map(root)
+    tag = f"  (via {source})" if source in ("env", "cli") else ""
+    print(f"active: {mid}{tag}")
     return 0
 
 
@@ -212,7 +241,18 @@ def cmd_map_use(args: argparse.Namespace) -> int:
         print(f"error: {e}", file=sys.stderr)
         return 1
     active = get_active_map_id(root)
+    env_map = os.environ.get("TERRA_MAP", "").strip()
+    if env_map and env_map != args.id:
+        print(f"active map → {env_map}  (TERRA_MAP overrides the pointer)")
+        print(
+            f"  NOTE: .terra/active_map now says '{args.id}', but TERRA_MAP={env_map} "
+            f"wins for every later command in this shell — unset TERRA_MAP or "
+            f"use terra --map {args.id} …"
+        )
+        return 0
     print(f"active map → {active}")
+    if env_map:
+        print("  (pinned by TERRA_MAP in this shell)")
     print(f"  belief path: {map_root(root)}")
     if active != "global":
         print(
@@ -488,6 +528,39 @@ def _print_budget_human(b: dict) -> None:
         )
     if b.get("tasks_without_points"):
         print(f"  tasks_without_points={b.get('tasks_without_points')}")
+
+
+def cmd_route_log(args: argparse.Namespace) -> int:
+    """Chronological what-happened view — routes are the record, not md files."""
+    from .agent_io import emit, error, success
+    from .route import route_log
+
+    try:
+        root = require_project_root()
+        out = route_log(root, limit=int(args.limit or 0))
+    except (FileNotFoundError, ValueError, OSError) as e:
+        return emit(error(str(e), code="route_log"))
+    if args.human:
+        c = out.get("counts") or {}
+        print(f"route log  events={c.get('events')}  shown={c.get('shown')}")
+        for ev in out.get("events") or []:
+            mark = "✗" if ev.get("kind") == "blocked" else "✓"
+            print(
+                f"{ev.get('at')}  {mark} {ev.get('task')}  "
+                f"[{ev.get('skill')}]  {ev.get('title')}"
+            )
+            if ev.get("note"):
+                print(f"    note: {ev['note']}")
+            if ev.get("freehand"):
+                print(f"    freehand: {ev['freehand']}")
+            if ev.get("runs"):
+                print(f"    runs: {', '.join(ev['runs'])}")
+            if ev.get("knowns"):
+                print(f"    knowns: {', '.join(ev['knowns'])}")
+            if ev.get("reason"):
+                print(f"    blocked: {ev['reason']}")
+        return 0
+    return emit(success(out, meta={"surface": "terra.route.log"}))
 
 
 def cmd_route_budget(args: argparse.Namespace) -> int:
@@ -1142,18 +1215,36 @@ def cmd_known_list(args: argparse.Namespace) -> int:
 
 
 def cmd_known_show(args: argparse.Namespace) -> int:
+    from .knowns import find_known_map, shadowed_ancestor
+    from .paths import get_active_map_id, scoped_map
+
     try:
         root = require_project_root()
-        desc = describe_known(root, args.id)
-    except (FileNotFoundError, OSError, json.JSONDecodeError) as e:
+        owner = find_known_map(root, args.id)
+        if owner is None:
+            raise FileNotFoundError(
+                f"known not found: {args.id} (searched the map parent chain)"
+            )
+        with scoped_map(owner):
+            desc = describe_known(root, args.id)
+        active = get_active_map_id(root)
+        shadow = shadowed_ancestor(root, args.id) if owner == active else None
+    except (FileNotFoundError, OSError, json.JSONDecodeError, ValueError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
     rec = desc["record"]
     if args.json:
-        print(json.dumps(rec, indent=2, sort_keys=True, default=str))
+        print(json.dumps({**rec, "map": owner}, indent=2, sort_keys=True, default=str))
         return 0
     st = rec.get("stats") or {}
     print(f"known {rec.get('id')}  type={rec.get('type')}  status={rec.get('status')}")
+    if owner != active:
+        print(f"map: {owner}  (inherited — active map is {active})")
+    if shadow:
+        print(
+            f"NOTE: shadows {shadow}'s known {rec.get('id')!r} for this map "
+            f"subtree — inherited value hidden here"
+        )
     print(f"claim: {rec.get('claim')}")
     print(
         f"confidence: claimed={rec.get('confidence')}  "
@@ -1230,10 +1321,11 @@ def cmd_known_show(args: argparse.Namespace) -> int:
     from .readings import list_consumers
     from .staleness import compute_staleness
 
-    info = compute_staleness(root).get(args.id) or {}
+    with scoped_map(owner):
+        info = compute_staleness(root).get(args.id) or {}
+        consumers = list_consumers(root, args.id)
     if info.get("stale"):
         print(f"STALE: {'; '.join(info.get('reasons') or [])}")
-    consumers = list_consumers(root, args.id)
     if consumers:
         print(
             "consumers: "
@@ -1254,6 +1346,9 @@ def cmd_known_get(args: argparse.Namespace) -> int:
             min_conf=args.min_conf,
             allow_stale=bool(args.allow_stale),
             allow_disagree=bool(getattr(args, "allow_disagree", False)),
+            allow_cohort_mismatch=bool(
+                getattr(args, "allow_cohort_mismatch", False)
+            ),
             consumer=args.consumer,
             at=getattr(args, "at", None),
         )
@@ -1264,6 +1359,114 @@ def cmd_known_get(args: argparse.Namespace) -> int:
         print(reading["value"])
         return 0
     print(json.dumps(reading, indent=2, sort_keys=True, default=str))
+    return 0
+
+
+def cmd_cohort_create(args: argparse.Namespace) -> int:
+    from .cohorts import create_cohort
+
+    try:
+        root = require_project_root()
+        members = [m.strip() for m in (args.members or "").split(",") if m.strip()]
+        rec = create_cohort(root, args.id, members=members, title=args.title or "")
+    except (ValueError, FileExistsError, FileNotFoundError, OSError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(rec, indent=2, sort_keys=True))
+        return 0
+    print(f"cohort {rec['id']}  members={', '.join(rec['members'])}")
+    print(
+        f"  members must share identical live evidence runs — refresh with:\n"
+        f"    terra cohort link-run {rec['id']} <run_id>"
+    )
+    return 0
+
+
+def cmd_cohort_add(args: argparse.Namespace) -> int:
+    from .cohorts import add_member
+
+    try:
+        root = require_project_root()
+        rec = add_member(root, args.id, args.known_id)
+    except (ValueError, FileNotFoundError, OSError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    print(f"cohort {rec['id']}  members={', '.join(rec['members'])}")
+    return 0
+
+
+def cmd_cohort_list(args: argparse.Namespace) -> int:
+    from .cohorts import check_cohort, list_cohorts
+
+    try:
+        root = require_project_root()
+        rows = [
+            {**c, "check": check_cohort(root, c)} for c in list_cohorts(root)
+        ]
+    except (ValueError, FileNotFoundError, OSError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(rows, indent=2, sort_keys=True))
+        return 0
+    if not rows:
+        print("cohorts: (none — terra cohort create <id> --members k1,k2)")
+        return 0
+    for c in rows:
+        chk = c["check"]
+        mark = "ok" if chk["consistent"] else "INCONSISTENT"
+        print(f"[{mark}] {c['id']}  members={', '.join(c.get('members') or [])}")
+        for pr in chk.get("problems") or []:
+            print(f"    ! {pr}")
+    return 0
+
+
+def cmd_cohort_check(args: argparse.Namespace) -> int:
+    from .cohorts import check_cohort
+
+    try:
+        root = require_project_root()
+        chk = check_cohort(root, args.id)
+    except (ValueError, FileNotFoundError, OSError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(chk, indent=2, sort_keys=True))
+        return 0 if chk["consistent"] else 1
+    mark = "ok" if chk["consistent"] else "INCONSISTENT"
+    print(f"[{mark}] cohort {chk['id']}  common_runs={chk['common_runs']}")
+    for pr in chk.get("problems") or []:
+        print(f"  ! {pr}")
+    if not chk["consistent"]:
+        print(
+            f"  fix with ONE re-solve, not per-known refreshes:\n"
+            f"    terra probe run <solver> --json && "
+            f"terra cohort link-run {chk['id']} <run_id>"
+        )
+    return 0 if chk["consistent"] else 1
+
+
+def cmd_cohort_link_run(args: argparse.Namespace) -> int:
+    from .cohorts import link_run_cohort
+
+    try:
+        root = require_project_root()
+        out = link_run_cohort(root, args.id, args.run_id)
+    except (ValueError, FileNotFoundError, OSError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(out, indent=2, sort_keys=True))
+        return 0
+    chk = out["check"]
+    mark = "ok" if chk["consistent"] else "INCONSISTENT"
+    print(
+        f"cohort {out['id']}  run {out['run_id']} linked to: "
+        f"{', '.join(out['linked'])}  [{mark}]"
+    )
+    for pr in chk.get("problems") or []:
+        print(f"  ! {pr}")
     return 0
 
 
@@ -1523,13 +1726,16 @@ def cmd_gate(args: argparse.Namespace) -> int:
     except (ValueError, FileNotFoundError, OSError) as e:
         return emit(error(str(e), code="gate"))
     if getattr(args, "human", False):
+        notices = verdict.get("notices") or []
         if verdict["ok"]:
             print(f"GATE PASS  maps={verdict['maps_checked']}")
-            return 0
-        print(f"GATE FAIL  maps={verdict['maps_checked']}")
-        for v in verdict["violations"]:
-            print(f"  [{v['kind']}] {v['map_id']}/{v['id']}: {v['why']}")
-        return 1
+        else:
+            print(f"GATE FAIL  maps={verdict['maps_checked']}")
+            for v in verdict["violations"]:
+                print(f"  [{v['kind']}] {v['map_id']}/{v['id']}: {v['why']}")
+        for n in notices:
+            print(f"  note [{n['kind']}] {n['map_id']}/{n['id']}: {n['why']}")
+        return 0 if verdict["ok"] else 1
     emit(success(verdict, meta={"surface": "terra.gate"}))
     return 0 if verdict["ok"] else 1
 
@@ -1562,7 +1768,52 @@ def cmd_known_link_run(args: argparse.Namespace) -> int:
             f"std={st.get('std')}  conf={rec.get('confidence')}/"
             f"{rec.get('confidence_derived')}"
         )
+    _note_cohort_and_convergence(root, rec, args.run_id)
     return 0
+
+
+def _note_cohort_and_convergence(root, rec, run_id: str) -> None:
+    """Agent NOTEs at the two coupled-solve footguns (best-effort)."""
+    from .cohorts import find_cohort_for
+    from .paths import run_dir
+    from .probe_run import RUN_META_NAME
+
+    try:
+        cohort = find_cohort_for(root, rec["id"])
+        if cohort is not None:
+            print(
+                f"  NOTE: {rec['id']} is a member of cohort "
+                f"{cohort.get('id')!r} — linking runs per-known can leave "
+                f"siblings citing a different solve. Prefer:\n"
+                f"    terra cohort link-run {cohort.get('id')} {run_id}"
+            )
+        meta_path = run_dir(root, run_id) / RUN_META_NAME
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        conv = meta.get("convergence")
+        if isinstance(conv, dict) and conv.get("converged"):
+            same_start = 0
+            for rid in rec.get("run_ids") or []:
+                if rid == run_id:
+                    continue
+                other_path = run_dir(root, rid) / RUN_META_NAME
+                if not other_path.is_file():
+                    continue
+                other = json.loads(other_path.read_text(encoding="utf-8"))
+                if (
+                    other.get("probe_id") == meta.get("probe_id")
+                    and isinstance(other.get("convergence"), dict)
+                    and other.get("to") == meta.get("to")
+                ):
+                    same_start += 1
+            if same_start:
+                print(
+                    f"  NOTE: {same_start} earlier linked solve(s) used the "
+                    f"same probe AND the same start (to) — identical "
+                    f"re-solves don't add independent evidence. Vary the "
+                    f"initial guess/damping (different --to) for real n."
+                )
+    except (json.JSONDecodeError, OSError, FileNotFoundError, ValueError):
+        pass
 
 
 def cmd_known_promote(args: argparse.Namespace) -> int:
@@ -1580,6 +1831,49 @@ def cmd_known_promote(args: argparse.Namespace) -> int:
     print(
         f"known {rec['id']}  confidence={rec.get('confidence')}  "
         f"status={rec.get('status')}  derived={rec.get('confidence_derived')}"
+    )
+    return 0
+
+
+def cmd_known_adopt(args: argparse.Namespace) -> int:
+    from .knowns import adopt_known
+    from .paths import map_parent
+
+    try:
+        root = require_project_root()
+        rec = adopt_known(root, args.id, from_map=args.from_map)
+        to_map = map_parent(root, args.from_map)
+    except (ValueError, FileExistsError, FileNotFoundError, OSError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    print(
+        f"adopted known {rec['id']}  {args.from_map} -> {to_map}  "
+        f"(n={rec.get('stats', {}).get('n')}, "
+        f"confidence={rec.get('confidence')})"
+    )
+    print(f"  runs copied with it; provenance stamped (adopted_from)")
+    if to_map != "global":
+        print(
+            f"  NOTE: {to_map} is not the top — climb further with: "
+            f"terra known adopt {rec['id']} --from {to_map}"
+        )
+    return 0
+
+
+def cmd_cohort_adopt(args: argparse.Namespace) -> int:
+    from .cohorts import adopt_cohort
+    from .paths import map_parent
+
+    try:
+        root = require_project_root()
+        rec = adopt_cohort(root, args.id, from_map=args.from_map)
+        to_map = map_parent(root, args.from_map)
+    except (ValueError, FileExistsError, FileNotFoundError, OSError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    print(
+        f"adopted cohort {rec['id']}  {args.from_map} -> {to_map}  "
+        f"members={', '.join(rec.get('members') or [])}"
     )
     return 0
 
@@ -1670,6 +1964,7 @@ def cmd_unknown_graduate(args: argparse.Namespace) -> int:
             into=getattr(args, "into", None),
             notes=args.notes,
             force=args.force,
+            cohort_id=getattr(args, "cohort_id", None),
         )
     except (ValueError, FileExistsError, FileNotFoundError, OSError) as e:
         print(f"error: {e}", file=sys.stderr)
@@ -1691,6 +1986,20 @@ def cmd_unknown_graduate(args: argparse.Namespace) -> int:
         f"  next: terra known link-run {rec['id']} <run_id>  "
         f"then  terra known promote {rec['id']} med"
     )
+    from .knowns import shadowed_ancestor
+
+    try:
+        shadow = shadowed_ancestor(root, rec["id"])
+    except ValueError:
+        shadow = None
+    if shadow:
+        print(
+            f"  NOTE: this known SHADOWS {shadow}'s {rec['id']!r} — reads on "
+            f"this map subtree now see the local value, not the inherited "
+            f"one. Rename if that's unintended, or adopt up when it proves "
+            f"out: terra known adopt {rec['id']} --from "
+            f"{get_active_map_id(root)}"
+        )
     return 0
 
 
@@ -2539,6 +2848,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_mc.add_argument("id", help="Session map slug")
     p_mc.add_argument("--purpose", default="", help="What this experiment is for")
     p_mc.add_argument(
+        "--parent",
+        default=None,
+        help="Parent map (default global) — reads fall through child -> "
+        "parent -> global; promote up with `terra known adopt`",
+    )
+    p_mc.add_argument(
         "--use",
         action="store_true",
         help="Set as active map after create",
@@ -2897,6 +3212,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_ugr.add_argument("--notes", default=None)
     p_ugr.add_argument(
+        "--cohort",
+        dest="cohort_id",
+        default=None,
+        metavar="COHORT_ID",
+        help="Join this coupled-known cohort at birth (created on first "
+        "member) — for quantities that settle together in one solve",
+    )
+    p_ugr.add_argument(
         "--force", action="store_true", help="Overwrite existing known"
     )
     p_ugr.add_argument("--json", action="store_true")
@@ -3034,6 +3357,49 @@ def build_parser() -> argparse.ArgumentParser:
     p_kc.add_argument("legacy_args", nargs=argparse.REMAINDER)
     p_kc.set_defaults(func=cmd_known_create)
 
+    p_kset = kn_sub.add_parser(
+        "set",
+        help="Edit known metadata (claim/notes/unit/status …) — never values; "
+        "evidence only enters via runs",
+    )
+    p_kset.add_argument("id", help="Known id")
+    p_kset.add_argument("--claim", default=None, help="Rewrite the claim string")
+    p_kset.add_argument("--notes", default=None)
+    p_kset.add_argument("--note", default=None, help=argparse.SUPPRESS)
+    p_kset.add_argument("--unit", default=None)
+    p_kset.add_argument(
+        "--quantity", default=None, help="Rename measured quantity (scalar types)"
+    )
+    p_kset.add_argument(
+        "--status", default=None, help="Known status (same set as known status)"
+    )
+    p_kset.add_argument(
+        "--confidence",
+        default=None,
+        help="Claim a confidence (blocked unless the sample ladder allows)",
+    )
+    p_kset.add_argument(
+        "--from-run",
+        dest="from_run",
+        default=None,
+        metavar="RUN_ID",
+        help="Also link this run (same as known link-run)",
+    )
+    p_kset.add_argument(
+        "--expression", default=None, help="Formula knowns: replace expression"
+    )
+    p_kset.add_argument(
+        "--var",
+        dest="vars",
+        action="append",
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    # --value exists only so the freehand footgun gets the loud refusal
+    p_kset.add_argument("--value", default=None, help=argparse.SUPPRESS)
+    p_kset.add_argument("--type", dest="type", default=None, help=argparse.SUPPRESS)
+    p_kset.set_defaults(func=cmd_known_set)
+
     p_kl = kn_sub.add_parser("list", help="List knowns")
     p_kl.add_argument("--json", action="store_true")
     p_kl.set_defaults(func=cmd_known_list)
@@ -3077,6 +3443,13 @@ def build_parser() -> argparse.ArgumentParser:
         dest="allow_disagree",
         action="store_true",
         help="Read even while methods disagree (recorded, not recommended)",
+    )
+    p_kg.add_argument(
+        "--allow-cohort-mismatch",
+        dest="allow_cohort_mismatch",
+        action="store_true",
+        help="Read even while the known's cohort cites mixed solves "
+        "(recorded, not recommended)",
     )
     p_kg.add_argument(
         "--consumer",
@@ -3256,6 +3629,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional status (default: active when med/high from provisional)",
     )
     p_kp.set_defaults(func=cmd_known_promote)
+
+    p_kad = kn_sub.add_parser(
+        "adopt",
+        help="Promote a known one hop up the map tree (child -> parent map); "
+        "copies live runs + stamps provenance; admission bar re-checked",
+    )
+    p_kad.add_argument("id")
+    p_kad.add_argument(
+        "--from",
+        dest="from_map",
+        required=True,
+        help="Source map (destination is its parent)",
+    )
+    p_kad.set_defaults(func=cmd_known_adopt)
 
     p_kst = kn_sub.add_parser("status", help="Set known status")
     p_kst.add_argument("id")
@@ -3445,6 +3832,68 @@ def build_parser() -> argparse.ArgumentParser:
     p_ds.set_defaults(func=cmd_design_check)
 
     # --- gate (mechanical debt collector) ---
+    p_coh = sub.add_parser(
+        "cohort",
+        help="Coupled knowns from one solve — valid only as a set "
+        "(consistency computed, gate-enforced)",
+    )
+    coh_sub = p_coh.add_subparsers(dest="cohort_cmd", required=True)
+
+    p_cc = coh_sub.add_parser(
+        "create", help="Declare a coupled set of existing knowns"
+    )
+    p_cc.add_argument("id", help="Cohort slug")
+    p_cc.add_argument(
+        "--members",
+        required=True,
+        metavar="K1,K2",
+        help="Member known ids (must exist on this map)",
+    )
+    p_cc.add_argument("--title", default="")
+    p_cc.add_argument("--json", action="store_true")
+    p_cc.set_defaults(func=cmd_cohort_create)
+
+    p_ca = coh_sub.add_parser("add", help="Add a known to a cohort")
+    p_ca.add_argument("id", help="Cohort slug")
+    p_ca.add_argument("known_id", help="Known id to add")
+    p_ca.set_defaults(func=cmd_cohort_add)
+
+    p_cl = coh_sub.add_parser("list", help="List cohorts with consistency")
+    p_cl.add_argument("--json", action="store_true")
+    p_cl.set_defaults(func=cmd_cohort_list)
+
+    p_ck = coh_sub.add_parser(
+        "check",
+        help="Computed consistency: members must share identical live runs "
+        "(exit 1 when mixed)",
+    )
+    p_ck.add_argument("id", help="Cohort slug")
+    p_ck.add_argument("--json", action="store_true")
+    p_ck.set_defaults(func=cmd_cohort_check)
+
+    p_clr = coh_sub.add_parser(
+        "link-run",
+        help="Fan one solve's run out to every member (the whole-family refresh)",
+    )
+    p_clr.add_argument("id", help="Cohort slug")
+    p_clr.add_argument("run_id", help="Run id from the converged solve")
+    p_clr.add_argument("--json", action="store_true")
+    p_clr.set_defaults(func=cmd_cohort_link_run)
+
+    p_cad = coh_sub.add_parser(
+        "adopt",
+        help="Adopt a whole cohort one hop up the map tree — coupled knowns "
+        "move as a set (refused while inconsistent)",
+    )
+    p_cad.add_argument("id", help="Cohort slug")
+    p_cad.add_argument(
+        "--from",
+        dest="from_map",
+        required=True,
+        help="Source map (destination is its parent)",
+    )
+    p_cad.set_defaults(func=cmd_cohort_adopt)
+
     p_gate = sub.add_parser(
         "gate",
         help="Mechanical gate: exit 0 iff no blocking unknowns, stale/unbacked "
@@ -3473,6 +3922,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_rst = rt_sub.add_parser("status", help="Counts + next + blocked (JSON)")
     p_rst.add_argument("--human", action="store_true")
     p_rst.set_defaults(func=cmd_route_status)
+
+    p_rlog = rt_sub.add_parser(
+        "log",
+        help="Chronological history: completions with evidence + blocks (JSON)",
+    )
+    p_rlog.add_argument(
+        "--limit", type=int, default=0, help="Show only the last N events"
+    )
+    p_rlog.add_argument("--human", action="store_true")
+    p_rlog.set_defaults(func=cmd_route_log)
 
     p_rbgt = rt_sub.add_parser(
         "budget",

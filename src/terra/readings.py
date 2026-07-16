@@ -139,14 +139,60 @@ def read_known(
     min_conf: str = "low",
     allow_stale: bool = False,
     allow_disagree: bool = False,
+    allow_cohort_mismatch: bool = False,
     consumer: str | None = None,
     record: bool = True,
     at: float | None = None,
 ) -> dict[str, Any]:
-    """Read a known for consumption. Loud on missing/unbacked/stale/low-conf."""
+    """Read a known for consumption. Loud on missing/unbacked/stale/low-conf.
+
+    Resolves through the map parent chain (child shadows ancestor); the
+    consumer edge lands on the owning map.
+    """
+    from .knowns import find_known_map
+    from .paths import get_active_map_id, scoped_map
+
     if min_conf not in CONFIDENCE_SET:
         raise ValueError(f"min_conf must be one of {sorted(CONFIDENCE_SET)}")
 
+    owner = find_known_map(project_root, known_id)
+    if owner is None:
+        raise FileNotFoundError(
+            f"known not found: {known_id} (searched the map parent chain) — "
+            f"survey it first "
+            f"(terra unknown create … && terra unknown graduate …)"
+        )
+    active = get_active_map_id(project_root)
+    with scoped_map(owner):
+        reading = _read_known_here(
+            project_root,
+            known_id,
+            min_conf=min_conf,
+            allow_stale=allow_stale,
+            allow_disagree=allow_disagree,
+            allow_cohort_mismatch=allow_cohort_mismatch,
+            consumer=consumer,
+            record=record,
+            at=at,
+        )
+    reading["map"] = owner
+    if owner != active:
+        reading["inherited"] = True
+    return reading
+
+
+def _read_known_here(
+    project_root: Path,
+    known_id: str,
+    *,
+    min_conf: str,
+    allow_stale: bool,
+    allow_disagree: bool,
+    allow_cohort_mismatch: bool,
+    consumer: str | None,
+    record: bool,
+    at: float | None,
+) -> dict[str, Any]:
     path = known_path(project_root, known_id)
     if not path.is_file():
         raise FileNotFoundError(
@@ -199,6 +245,27 @@ def read_known(
             f"{known_id} --reason '…'"
         )
 
+    from .cohorts import check_cohort, find_cohort_for
+
+    cohort_info = None
+    cohort_rec = find_cohort_for(project_root, known_id)
+    if cohort_rec is not None:
+        chk = check_cohort(project_root, cohort_rec)
+        cohort_info = {
+            "id": chk["id"],
+            "consistent": chk["consistent"],
+            "common_runs": chk["common_runs"],
+        }
+        if not chk["consistent"] and not allow_cohort_mismatch:
+            raise ValueError(
+                f"known {known_id} is a member of cohort {chk['id']!r} whose "
+                f"members are NOT backed by the same solve — this value is "
+                f"only meaningful jointly with its siblings.\n  - "
+                + "\n  - ".join(chk["problems"])
+                + f"\n    terra probe run <solver> --json && "
+                f"terra cohort link-run {chk['id']} <run_id>"
+            )
+
     who = resolve_consumer(consumer)
     if record:
         record_consumption(project_root, known_id, who)
@@ -230,6 +297,7 @@ def read_known(
         "corroboration": corr,
         "uncertainty": corr.get("spread"),
         "band": corr.get("band"),
+        **({"cohort": cohort_info} if cohort_info else {}),
         "consumer": who,
     }
 

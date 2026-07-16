@@ -81,11 +81,14 @@ def test_accept_unblocks_with_band(contested):
     assert r["uncertainty"] == pytest.approx(corr["spread"])
     assert r["band"] and r["band"][0] < 31.5 < 33.0 < r["band"][1]
 
-    # gate clean; attention drops to info
+    # gate clean but the accepted band is surfaced as a notice
+    verdict = check_gate(contested)
     assert not [
-        v for v in check_gate(contested)["violations"]
-        if v["kind"] == "methods_disagree"
+        v for v in verdict["violations"] if v["kind"] == "methods_disagree"
     ]
+    notes = [n for n in verdict["notices"] if n["kind"] == "spread_accepted"]
+    assert [n["id"] for n in notes] == ["cg"]
+    assert "irreducible at phase 0" in notes[0]["why"]
     board = collect_status_board(contested)
     kinds = {a["kind"]: a["severity"] for a in board["attention"]}
     assert "methods_disagree" not in kinds
@@ -119,10 +122,14 @@ def test_widening_spread_retrips_alarm(contested):
     assert rec["confidence_derived"] == "low"
     with pytest.raises(ValueError, match="DISAGREE"):
         read_known(contested, "cg")
+    verdict = check_gate(contested)
     assert any(
-        v["kind"] == "methods_disagree"
-        for v in check_gate(contested)["violations"]
+        v["kind"] == "methods_disagree" for v in verdict["violations"]
     )
+    # revoked acceptance is a violation again, not a quiet notice
+    assert not [
+        n for n in verdict["notices"] if n["kind"] == "spread_accepted"
+    ]
 
 
 def test_agreement_clears_acceptance(contested):
@@ -134,5 +141,9 @@ def test_agreement_clears_acceptance(contested):
     corr = rec["stats"]["corroboration"]
     assert corr["agree"] is True
     assert "accepted_spread" not in rec
+    assert not [
+        n for n in check_gate(contested)["notices"]
+        if n["kind"] == "spread_accepted"
+    ]
     # road to high reopens (n>=5, tight, 2 agreeing methods)
     assert rec["confidence_derived"] == "high"

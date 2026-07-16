@@ -5,8 +5,13 @@
   - no unbacked knowns (evidence voided/unlinked away)
   - no stale knowns (dependency moved without re-derivation)
   - no knowns whose independent methods disagree beyond tolerance
+  - no cohorts whose members cite different solves (mixed coupled sets)
   - no unsatisfied evidence plans
   - no red design params/artifacts (moved knowns, unregenerated files)
+
+Accepted spreads (``known accept-spread``) do not fail the gate but are
+surfaced as non-blocking ``notices`` — a release built on an accepted band
+should say so out loud.
 
 Route integration: completing a ``deliverable`` task requires the gate to
 pass (or an explicit recorded override).
@@ -27,18 +32,22 @@ from .paths import (
 
 def _collect_map_violations(
     project_root: Path, map_id: str
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    from .cohorts import cohort_violations
     from .knowns import list_knowns
     from .plans import list_plans
     from .staleness import compute_staleness
     from .unknowns import list_unknowns
 
     violations: list[dict[str, Any]] = []
+    notices: list[dict[str, Any]] = []
     with scoped_map(map_id):
         unknowns = list_unknowns(project_root)
         knowns = list_knowns(project_root)
         plans = list_plans(project_root)
         stale = compute_staleness(project_root)
+        for v in cohort_violations(project_root):
+            violations.append({**v, "map_id": map_id})
 
     for u in unknowns:
         rec = u.get("record") or {}
@@ -84,6 +93,21 @@ def _collect_map_violations(
                     ),
                 }
             )
+        if corr.get("agree") is False and corr.get("accepted") is True:
+            acc = rec.get("accepted_spread") or {}
+            notices.append(
+                {
+                    "kind": "spread_accepted",
+                    "id": kid,
+                    "map_id": map_id,
+                    "why": (
+                        f"known {kid}: cross-method spread "
+                        f"{corr.get('spread')!r} accepted as uncertainty "
+                        f"(band={corr.get('band')!r}; reason: "
+                        f"{acc.get('reason')})"
+                    ),
+                }
+            )
         info = stale.get(str(kid)) or {}
         if info.get("stale"):
             violations.append(
@@ -115,7 +139,7 @@ def _collect_map_violations(
                 }
             )
 
-    return violations
+    return violations, notices
 
 
 def check_gate(
@@ -129,8 +153,11 @@ def check_gate(
     else:
         map_ids = [m["id"] for m in list_maps(project_root)] or [GLOBAL_MAP_ID]
     violations: list[dict[str, Any]] = []
+    notices: list[dict[str, Any]] = []
     for mid in map_ids:
-        violations.extend(_collect_map_violations(project_root, mid))
+        vs, ns = _collect_map_violations(project_root, mid)
+        violations.extend(vs)
+        notices.extend(ns)
     # Design layer is project-wide: red params/artifacts fail release
     from .design import check_design
 
@@ -141,6 +168,7 @@ def check_gate(
         "maps_checked": map_ids,
         "active_map": get_active_map_id(project_root),
         "violations": violations,
+        "notices": notices,
         "counts": {
             kind: sum(1 for v in violations if v["kind"] == kind)
             for kind in sorted({v["kind"] for v in violations})

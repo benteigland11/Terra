@@ -23,7 +23,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .paths import knowns_root
+from .paths import knowns_root, map_chain, scoped_map
 
 DEP_KIND_KNOWN = "known"
 DEP_KIND_FILE = "file"
@@ -65,26 +65,31 @@ def stamp_deps(project_root: Path, rec: dict[str, Any]) -> dict[str, Any]:
     for entry in deps.get("files") or []:
         p = project_root / str(entry.get("path") or "")
         entry["sha256"] = file_sha256(p)
-    for entry in deps.get("knowns") or []:
-        up_path = knowns_root(project_root) / f"{entry.get('id')}.json"
-        try:
-            up = json.loads(up_path.read_text(encoding="utf-8"))
-            entry["as_of"] = up.get("updated_at")
-        except (OSError, json.JSONDecodeError):
-            entry["as_of"] = None
+    if deps.get("knowns"):
+        upstream = _load_all_knowns(project_root)
+        for entry in deps.get("knowns") or []:
+            up = upstream.get(str(entry.get("id") or ""))
+            entry["as_of"] = up.get("updated_at") if up else None
     return rec
 
 
 def _load_all_knowns(project_root: Path) -> dict[str, dict[str, Any]]:
-    root = knowns_root(project_root)
+    """Chain overlay for the active map: ancestors first, child shadows.
+
+    Inherited knowns participate in dep resolution and cascade, so a child
+    known goes stale when an ancestor dep moves.
+    """
     out: dict[str, dict[str, Any]] = {}
-    if not root.is_dir():
-        return out
-    for path in sorted(root.glob("*.json")):
-        try:
-            out[path.stem] = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
+    for mid in reversed(map_chain(project_root)):
+        with scoped_map(mid):
+            root = knowns_root(project_root)
+            if not root.is_dir():
+                continue
+            for path in sorted(root.glob("*.json")):
+                try:
+                    out[path.stem] = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    continue
     return out
 
 

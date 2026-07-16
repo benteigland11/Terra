@@ -143,3 +143,23 @@ def test_unbacked_known_surfaces_in_attention(tmp_path: Path, monkeypatch):
     assert any(
         a.get("op") == "known.link-run" for a in board["next_actions"]
     )
+
+
+def test_known_set_cli_edits_claim(tmp_path, monkeypatch, capsys):
+    """`terra known set` is wired: metadata edits work, freehand value refused."""
+    monkeypatch.chdir(tmp_path)
+    _typed_unknown_with_run(tmp_path)
+    kid = "gap"
+    graduate_unknown(tmp_path, kid)
+
+    from terra.cli import main
+
+    assert main(["known", "set", kid, "--claim", "sharper claim?"]) == 0
+    assert load_known(tmp_path, kid)["claim"] == "sharper claim?"
+
+    assert main(["known", "set", kid, "--value", "42"]) == 1
+    err = capsys.readouterr().err
+    assert "freehand --value is not supported" in err
+
+    assert main(["known", "set", kid]) == 1
+    assert "nothing to set" in capsys.readouterr().err

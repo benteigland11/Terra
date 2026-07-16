@@ -75,15 +75,23 @@ terra route unlock-plan --confirm
 After editing user skills:
 
 ```bash
-USER_SKILLS="terra-start terra-brief terra-route terra-survey terra-scopes terra-map terra-probe"
-for s in $USER_SKILLS terra-dev; do
+# ARRAY, not a string. zsh does NOT word-split an unquoted scalar, so
+# `for s in $USER_SKILLS` iterates ONCE over the whole string and silently
+# mkdir's a literal dir named "terra-start terra-brief terra-route …".
+# This bit us for real — check for it: ls -d ~/.claude/skills/*' '*
+USER_SKILLS=(terra-start terra-brief terra-route terra-survey terra-scopes terra-map terra-probe)
+for s in "${USER_SKILLS[@]}" terra-dev; do
   mkdir -p ~/.grok/skills/$s ~/.claude/skills/$s ~/.codex/skills/$s
   cp skills/$s/SKILL.md ~/.grok/skills/$s/SKILL.md
   cp skills/$s/SKILL.md ~/.claude/skills/$s/SKILL.md
   cp skills/$s/SKILL.md ~/.codex/skills/$s/SKILL.md
 done
+# Verify the sync actually landed (md5s match, no junk dirs):
+# for s in "${USER_SKILLS[@]}" terra-dev; do
+#   diff -q skills/$s/SKILL.md ~/.claude/skills/$s/SKILL.md || echo "OUT OF SYNC: $s"
+# done
 # product projects (skip terra-dev):
-# for s in $USER_SKILLS; do
+# for s in "${USER_SKILLS[@]}"; do
 #   for d in .claude/skills .codex/skills .grok/skills; do
 #     mkdir -p $PROJ/$d/$s && cp skills/$s/SKILL.md $PROJ/$d/$s/SKILL.md
 #   done
@@ -121,6 +129,20 @@ terra --map night_trial unknown show hostiles
 ```
 
 Probes are **global**; runs land on **active** map. Wrong active map = silent wrong store.
+
+### 2b. Active map: one shared pointer + TERRA_MAP per-shell pin
+
+`.terra/active_map` is project-wide — concurrent sessions calling `map use`
+clobber each other. Resolution (`paths.resolve_active_map`, returns
+`(id, source)`): CLI `--map` context → `TERRA_MAP` env → pointer file →
+global. Concurrent sessions must pin via `TERRA_MAP` or `--map`, never the
+pointer. Surfaces: `map status` envelope carries `active_map_source` +
+`active_map_missing` attention (env/file naming a nonexistent map);
+`map use` under `TERRA_MAP` prints a NOTE (env still wins);
+`map list`/status human lines tag `(via env)`. Watch out in-process:
+`write_active_map` syncs the ContextVar, so after `map use` the source reads
+"cli" even when the env is set — tests reset with `set_active_map_id(None)`
+to model a fresh shell. Tests: `tests/test_map_env.py`.
 
 ### 3. Scaffold probes validate PASS (now self-announcing)
 
@@ -180,6 +202,14 @@ Prefer detecting `--all` or multi-map inventory before concluding "done."
 Top-level `terra known` help may still say "number only" while formula/plan exist.  
 After CLI help changes, re-read `--help` in DX smoke.
 
+### 9b. Advertised commands must be wired
+
+`known set` existed as cmd_known_set + substrate (and error messages
+advertised it) but the argparse parser was never registered — agents hit
+a phantom command and detoured through `status --notes`. When a message
+or NOTE names a command, grep `func=cmd_...` to confirm it's wired; add
+a CLI-level test (tests/test_graduate.py::test_known_set_cli_edits_claim).
+
 ### 10. PYTHONPATH vs installed entrypoint
 
 Dev: `PYTHONPATH=src` or `pip install -e .`.  
@@ -226,7 +256,7 @@ graduate) or `terra known tolerance <id> --within X`. Formula type exempt.
 Accept-spread: `known accept-spread --reason` stamps `accepted_spread`
 {spread, band}; `reconcile_accepted_spread` (corroboration.py) re-judges on
 every recompute — within stamp → corr.accepted=True (reads unblock with
-uncertainty+band, derived caps med, gate/attention downgrade); spread grew →
+uncertainty+band, derived caps med, gate violation clears but surfaces as a non-blocking `notices` entry, attention downgrades to info); spread grew →
 accepted=False, full alarm; agree=True → stamp dropped. `methods_disagree()`
 = unaccepted disagreement only.
 Tests: `tests/test_corroboration.py`, `tests/test_accept_spread.py`.
@@ -240,6 +270,52 @@ refuse prose-only complete — `--freehand '<reason>'` is the recorded escape.
 `validate_route` rejects dep cycles (load + save, so hand-edited files too).
 `route_status().attention`: task_blocked, task_stalled (in_progress ≥7d,
 STALL_DAYS). Tests: `tests/test_route_evidence.py`.
+
+### 14b. route log is the timeline — no shadow trackers
+
+`terra route log` (route.py `route_log`) is a **pure view** over
+route.json: one event per evidence entry (note/runs/knowns/freehand),
+bare events for evidence-less done tasks, `blocked` events for currently
+blocked tasks, sorted by `at`. Added because agents were keeping shadow
+markdown drive-logs when they couldn't read a chronological story out of
+routes. Keep it stateless — never write log entries as separate state.
+Tests: `tests/test_route_evidence.py` (route_log cases).
+
+### 14c. Convergence + cohorts: coupled solves
+
+`cohorts.py` + convergence block in `probe_run.py`. Two invariants:
+(1) **the solve is the sample** — probes running iterative loops emit one
+run with `convergence:{converged,iterations,residual,tol,criterion}`;
+`converged:false` runs stamp but are refused by BOTH link paths
+(knowns.link_run_known + unknowns.link_run). Iterates never stamp runs.
+(2) **cohort = coupled knowns valid only as a set** (one solve → many
+quantities). Membership is the only stored state
+(`.terra/map/<scope>/cohorts/`); consistency is COMPUTED (members must
+share identical live run sets) — never store it. Mixed cohort →
+`cohort_inconsistent` in gate + map-status attention, `known get` refuses
+on every member (`--allow-cohort-mismatch` escape). Fan-out refresh:
+`terra cohort link-run <id> <run>`; `unknown graduate --cohort` joins at
+birth; per-member `known link-run` prints a NOTE (plus a same-start
+re-solve NOTE — identical `to` on a converge probe adds no n).
+Tests: `tests/test_cohorts.py`.
+
+### 14d. Map tree: read-through, shadowing, adopt
+
+Maps form a parent tree (`map create --parent`, meta `parent` field;
+`paths.map_chain` walks child→global, loud on cycles). Reads
+(`known get/show`, dep resolution, staleness overlay in
+`staleness._load_all_knowns`) fall through the chain child-first; **writes
+stay local**. A child known with the same id SHADOWS the ancestor's for its
+subtree — graduate prints a NOTE; a post-adopt local copy keeps shadowing
+until deleted (intentional: adoption never mutates the source map's beliefs
+beyond the `adopted_to` stamp). `known adopt` / `cohort adopt` promote ONE
+hop up: admission bar (`knowns._adoption_problems`, >= med, backed, agree,
+not stale) re-checked per hop; live run dirs are COPIED to the destination
+(maps stay self-contained — never cross-map run refs); deps must resolve
+from the destination (bottom-up refusal). Cohort members refuse solo adopt.
+`compute_staleness` now returns inherited ids too — `.get(kid)` callers are
+unaffected, but don't iterate it assuming local-only keys.
+Tests: `tests/test_map_tree.py`.
 
 ### 15. Relation type: F(x) knowns
 

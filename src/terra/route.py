@@ -1118,6 +1118,62 @@ def route_attention(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return items
 
 
+def route_log(
+    project_root: Path,
+    *,
+    limit: int = 0,
+) -> dict[str, Any]:
+    """Chronological history of what happened, with evidence.
+
+    Pure view over route.json — no new state. One event per evidence
+    entry (completion records carry note/runs/knowns/freehand), plus
+    bare events for done tasks with no evidence and currently blocked
+    tasks. This is the timeline agents were faking with shadow md logs.
+    """
+    rec = load_route(project_root)
+    events: list[dict[str, Any]] = []
+    for t in rec.get("tasks") or []:
+        base = {
+            "task": t.get("id"),
+            "title": t.get("title"),
+            "skill": t.get("skill"),
+            "phase": t.get("phase") or None,
+        }
+        entries = list(t.get("evidence") or [])
+        for entry in entries:
+            ev: dict[str, Any] = {
+                "at": entry.get("at"),
+                "kind": "complete",
+                **base,
+            }
+            for key in ("note", "runs", "knowns", "freehand"):
+                if entry.get(key):
+                    ev[key] = entry[key]
+            events.append(ev)
+        if t.get("status") == "done" and not entries:
+            events.append(
+                {"at": t.get("updated_at"), "kind": "complete", **base}
+            )
+        if t.get("status") == "blocked":
+            events.append(
+                {
+                    "at": t.get("updated_at"),
+                    "kind": "blocked",
+                    **base,
+                    "reason": t.get("blocked_reason"),
+                }
+            )
+    events.sort(key=lambda e: str(e.get("at") or ""))
+    total = len(events)
+    if limit and limit > 0:
+        events = events[-limit:]
+    return {
+        "command": "route.log",
+        "counts": {"events": total, "shown": len(events)},
+        "events": events,
+    }
+
+
 def route_status(project_root: Path) -> dict[str, Any]:
     rec = load_route(project_root)
     rec["tasks"] = _recompute_ready(list(rec.get("tasks") or []))

@@ -3,7 +3,9 @@ name: terra-probe
 description: >
   REQUIRED when building or fixing Terra map instruments (probes): writing or
   debugging probe.py, probe validate failures (INPUT/EXECUTE/OUTPUT), watch
-  windows, dry_run / level1 validation, suites (ordered probe recipes), measures
+  windows, dry_run / level1 validation, iterative solvers ("run until it
+  settles" — convergence block, the solve is the sample, multi-start),
+  suites (ordered probe recipes), measures
   for typed map nodes, to/status envelopes, map lib helpers. Fire on "probe
   won't validate", "implement the probe", suite create/run, watch duration,
   REQUIRED_EXPORTS, link-probe, OR when a claim-shaped route task has no probe
@@ -215,6 +217,18 @@ run = one sweep). Keep a **shared x grid** across sweeps and across methods:
 stations match on exact x, and corroboration only judges shared stations.
 Repeat the sweep for the ladder (n = sweeps, not points).
 
+**State the condition basis of every station** — in the probe docstring AND the
+known's claim. A sweep over one variable silently PINS the others, and the
+pinned value is where curves lie while every number in them is "correct":
+`margin vs mach` evaluated at sea-level density is *this Mach flown down low* —
+a dynamic-pressure corner the vehicle may never reach — so it reads as failure
+at a cruise point that is genuinely fine. If `x` is a **proxy** (Mach) for what
+actually drives the physics (EAS / dynamic pressure / altitude), say so at every
+station. Ask before emitting: *"is each station a condition the system can
+really be in?"* Unreachable stations belong labelled as bounding corners, not
+mixed into a curve someone will read as the flight envelope — and never let the
+sweep contradict the single-point gate without explaining which one governs.
+
 ## Probes are methods (corroboration)
 
 A second *independent* probe for the same quantity is how a known reaches
@@ -223,3 +237,31 @@ second method differently (e.g. CAD mass-properties vs spreadsheet buildup),
 emit the **same quantity name**, and link runs to the same known. Terra
 groups stats per probe and judges agreement against the known's
 `--within` tolerance (**terra-survey**).
+
+## Iterative solvers (convergence)
+
+When the only solver is "run until the system settles" (sizing loops,
+fixed-point iteration, relaxation), **the solve is the sample** — the loop
+runs INSIDE the probe and only the settled value leaves it:
+
+```python
+return {
+    'to': to, 'status': 'ok',
+    'artifacts': [...],                    # residual history goes here
+    'measures': [{'quantity': 'we', 'value': we},      # all coupled
+                 {'quantity': 's_wing', 'value': s}],  # outputs, one run
+    'convergence': {'converged': True, 'iterations': k,
+                    'residual': r, 'tol': tol,
+                    'criterion': 'max|dx|/x < tol'},
+}
+```
+
+Laws:
+- Iterates NEVER stamp runs. One run-to-settle = n=1.
+- `converged: false` runs stamp but are **unlinkable** as evidence — an
+  unsettled iterate is not a value. Fix the solve, re-run.
+- Independent evidence = **multi-start**: re-solve from a different initial
+  guess/damping (different `--to`). Same-start re-solves don't add n (the
+  CLI NOTEs when you try). Different starts agreeing = real corroboration
+  AND catches multiple basins of attraction.
+- Coupled outputs (valid only as a set) → cohort (**terra-survey**).

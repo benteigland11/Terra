@@ -3,7 +3,9 @@ name: terra-survey
 description: >
   REQUIRED for Terra map beliefs and evidence: unknown create/link/resolve,
   unknown graduate (known birth), known get/depend/tolerance/reaffirm/link/promote,
-  corroboration (methods agree), design add/attach/check (stable baseline), gate,
+  corroboration (methods agree), cohorts (coupled knowns from one converged
+  solve — create/check/link-run fan-out, mixed-set refusals),
+  design add/attach/check (stable baseline), gate,
   plan create/link/promote, run void/list, typed
   number|boolean|formula, claim-shaped analysis without freehand, n-ladder /
   promote rules. Fire on fog, "open an unknown", encode a known, formula gate,
@@ -30,10 +32,18 @@ Instruments: **terra-probe**. Program tasks: **terra-route**.
 8. Consume knowns, never copy them: `terra known get` / `readings.known()` —
    a number hardcoded in a tool/sheet is drift waiting to happen.  
 9. Declare deps (`known depend --on known:x --on file:y`); stale knowns must be
-   re-derived (link-run) or `reaffirm`ed with a reason — never consumed silently.  
+   re-derived (link-run) or `reaffirm`ed with a reason — never consumed silently.
+   A belief **nothing depends on is inert**. Tracking a constraint (flutter,
+   clearance, margin) with no edge to what it endangers means a later refute
+   cascades nowhere and the design never de-closes — coordination by attention,
+   not by gate. `known tree <id>` printing `upstream/downstream: (none)` on a
+   **safety- or constraint-shaped** known is a finding, not a detail: wire it to
+   what it would knock over. A plain `depend` edge accepts a `low`/uncertain
+   known (design params need ≥med) and still arms the cascade — that is the job.  
 10. `terra gate` is the debt collector: blocking unknowns, stale/unbacked
    knowns, disagreeing methods, incomplete plans mechanically fail it
-   (deliverable route tasks run it).  
+   (deliverable route tasks run it). Accepted spreads don't fail it but are
+   surfaced as non-blocking `notices` — a release on an accepted band says so.  
 11. Two evidence axes: repetition (same probe, more runs) proves precision;
    **corroboration** (different probes agreeing `--within` tolerance) proves
    truth. `high` needs ≥2 agreeing methods; methods in disagreement collapse
@@ -171,7 +181,8 @@ probes → runs → knowns/unknowns (number | boolean | formula)
 
 ```bash
 terra unknown create | link-probe | link-run | graduate [--with|--into] | show | status | unlink-run | delete
-terra known get | depend | graph | tree | tolerance | accept-spread | reaffirm | link-run | promote | show | unlink-run | delete
+terra known get | set (metadata: --claim/--notes/--unit; never values) | depend | graph | tree | tolerance | accept-spread | reaffirm | link-run | promote | show | unlink-run | delete
+terra cohort create | add | list | check | link-run   # coupled sets, fan-out refresh
 terra design add | attach | check | refresh | get | remove | detach
 terra gate       # mechanical debt check (all maps + design)
 terra plan create | link-run --leg | promote | show
@@ -184,3 +195,29 @@ terra map status
 Unknown → run → link → known/plan as needed; no empty resolves; bad runs voided; status honest.
 
 *Scopes: **terra-scopes**. Probes: **terra-probe**. Route complete evidence: **terra-route**.*
+
+## Cohorts (coupled knowns from one solve)
+
+Quantities that settle TOGETHER in one converged solve (sizing loop:
+empty weight + wing area + power) are only mutually consistent within
+one solve. Individually healthy knowns can jointly describe a design
+that never existed. Declare the coupling:
+
+```bash
+terra unknown graduate we --cohort sizing_set        # join at birth
+terra unknown graduate s_wing --cohort sizing_set    # (created on first)
+# or later: terra cohort create sizing_set --members we,s_wing
+terra cohort list / check sizing_set                 # computed, never stored
+```
+
+Laws:
+- Members must carry **identical live run sets**. Mixed cohort →
+  `cohort_inconsistent` attention, gate failure, and `known get` refuses
+  on EVERY member (`--allow-cohort-mismatch` is the recorded escape).
+- Refresh is ONE action, never per-known:
+  `terra probe run <solver> --json && terra cohort link-run <id> <run_id>`
+  — fans the solve out to all members; one multi-start re-solve advances
+  n for the whole family.
+- Per-known `link-run` on a member prints a NOTE for a reason: stop and
+  use the cohort fan-out.
+- A known has ONE coupling context (one cohort max).
