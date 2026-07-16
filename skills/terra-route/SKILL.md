@@ -23,12 +23,21 @@ Claims need map evidence → **terra-survey** (+ **terra-probe** for instruments
 terra brief show              # still the mission? (details: terra-brief)
 terra route next              # pickable / in_progress
 terra map status              # attention (details: terra-scopes / terra-survey)
-terra route start <id>
+terra route start <id> --agent <you>   # claim ownership (attributes a stranded lead)
 # do work (or subagent with task id, skill, acceptance)
+terra route heartbeat <id>    # ping during long silent work — I'm still alive
 terra route complete <id> --evidence "…"
 # or: terra route block <id> --reason "…"
 terra route next
 ```
+
+**Claim + heartbeat, because status is not liveness.** `route start --agent`
+stamps an owner and opens a heartbeat; a task that dies mid-work simply stops
+pinging. Send `terra route heartbeat <id>` during long silent stretches so a
+live lead stays distinguishable from a dead one. **Never infer liveness from
+`in_progress` and re-dispatch** — that is how a stranded route caused a
+double-writer collision. If `route status` shows `task_no_heartbeat`, verify
+the owner is really gone before touching its work.
 
 ```bash
 terra route status            # counts + next + blocked
@@ -173,5 +182,8 @@ and their methods must not disagree. Evidence entries carry structured
 
 - Dep cycles are rejected at add/save time (`dependency cycle: a -> b -> a`) —
   a cycle would silently make tasks never-pickable.
-- `route status` carries `attention`: `task_blocked` (with reason) and
-  `task_stalled` (in_progress untouched ≥7 days — complete/block or split).
+- `route status` carries `attention`: `task_blocked` (with reason),
+  `task_stalled` (in_progress untouched ≥7 days — complete/block or split),
+  and `task_no_heartbeat` (owner's heartbeat quiet ≥6h — possible dead lead;
+  carries `owner` + `hours_since_heartbeat`). Treat `task_no_heartbeat` as
+  "verify before touching," not "free to re-dispatch."
