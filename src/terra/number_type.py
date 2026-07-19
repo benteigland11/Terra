@@ -416,6 +416,7 @@ def recompute_typed_node(
     all_values: list[Any] = []
     sample_runs: list[dict[str, Any]] = []
     values_by_probe: dict[str, list[Any]] = {}
+    input_assumptions: set[str] = set()
     for rid in record.get("run_ids") or []:
         if not isinstance(rid, str):
             continue
@@ -440,6 +441,20 @@ def recompute_typed_node(
                 }
             )
             continue
+        from .run_inputs import run_input_state
+
+        input_state = run_input_state(project_root, meta)
+        if input_state["stale"]:
+            sample_runs.append(
+                {
+                    "run_id": rid,
+                    "n": 0,
+                    "stale_inputs": True,
+                    "stale_reasons": input_state["reasons"],
+                }
+            )
+            continue
+        input_assumptions.update(input_state["assumptions"])
         if map_type == "relation":
             from .relation_type import extract_relation_pairs_from_run_meta
 
@@ -526,6 +541,8 @@ def recompute_typed_node(
     stats["corroboration"] = corr
     record = dict(record)
     record["stats"] = stats
+    record["conditional"] = bool(input_assumptions)
+    record["assumptions"] = sorted(input_assumptions)
     record["confidence_derived"] = derive_confidence(stats, map_type=map_type)
     claimed = record.get("confidence") or "low"
     if claimed not in CONFIDENCE_SET:

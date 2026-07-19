@@ -1,4 +1,4 @@
-"""Terra CLI — map layer: probes + unknowns."""
+"""Terra CLI — brief, route, and map state."""
 
 from __future__ import annotations
 
@@ -9,6 +9,28 @@ import sys
 from pathlib import Path
 
 from . import __version__
+from .agent_io import emit, error, success
+from .assumptions import (
+    create_assumption,
+    describe_assumption,
+    link_probe_assumption,
+    link_run_assumption,
+    list_assumptions,
+    read_assumption,
+    set_assumption,
+    unlink_run_assumption,
+)
+from .calculations import (
+    create_calculation,
+    delete_calculation,
+    get_calculation,
+    list_calculations,
+    load_calculation,
+    parse_bindings,
+    parse_output_specs,
+    run_calculation,
+    validate_calculation,
+)
 from .paths import (
     GLOBAL_MAP_ID,
     create_session_map,
@@ -966,6 +988,8 @@ def cmd_probe_create(args: argparse.Namespace) -> int:
     """
     try:
         root, created_store = ensure_project_root()
+        from .map_inputs import parse_map_bindings
+
         pdir = init_probe(
             root,
             args.id,
@@ -973,6 +997,7 @@ def cmd_probe_create(args: argparse.Namespace) -> int:
             kind=args.kind,
             duration_s=args.duration,
             force=args.force,
+            inputs=parse_map_bindings(args.input or []),
         )
     except (ValueError, FileExistsError, OSError) as e:
         print(f"error: {e}", file=sys.stderr)
@@ -987,6 +1012,11 @@ def cmd_probe_create(args: argparse.Namespace) -> int:
 
 def cmd_unknown_create(args: argparse.Namespace) -> int:
     try:
+        if args.no_blocks_build:
+            raise ValueError(
+                "unknowns are hard composability gates; use `terra assumption "
+                "create` for a provisional consumable value"
+            )
         root, created_store = ensure_project_root()
         path = create_unknown(
             root,
@@ -1034,7 +1064,11 @@ def cmd_unknown_list(args: argparse.Namespace) -> int:
     except FileNotFoundError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
-    rows = list_unknowns(root)
+    rows = [
+        row
+        for row in list_unknowns(root)
+        if (row.get("record") or {}).get("role", "unknown") == "unknown"
+    ]
     if args.json:
         print(json.dumps(rows, indent=2, default=str))
         return 0
@@ -1057,6 +1091,246 @@ def cmd_unknown_list(args: argparse.Namespace) -> int:
         for b in r.get("blocks") or []:
             print(f"  block: {b}")
     return 0
+
+
+def _parse_assumption_value(raw: str, map_type: str) -> object:
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"assumption value must be JSON: {e}") from e
+    if map_type == "boolean" and not isinstance(value, bool):
+        raise ValueError("boolean assumption value must be true or false")
+    if map_type == "number" and (
+        not isinstance(value, (int, float)) or isinstance(value, bool)
+    ):
+        raise ValueError("number assumption value must be numeric")
+    return value
+
+
+def cmd_assumption_create(args: argparse.Namespace) -> int:
+    try:
+        root, created_store = ensure_project_root()
+        value = _parse_assumption_value(args.value, args.type)
+        path = create_assumption(
+            root,
+            args.id,
+            claim=args.claim,
+            map_type=args.type,
+            quantity=args.quantity,
+            value=value,
+            reason=args.reason,
+            evidence_needed=args.evidence,
+            unit=args.unit or "",
+            probe_id=args.probe,
+            notes=args.notes or "",
+            force=args.force,
+        )
+        _announce_write_target(root, "assumption create")
+    except (ValueError, FileExistsError, OSError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    if created_store:
+        print(f"initialized {root / '.terra' / 'map'}")
+    return emit(success(read_assumption(root, args.id), meta={"surface": "terra.assumption.create", "path": str(path)}))
+
+
+def cmd_assumption_list(args: argparse.Namespace) -> int:
+    try:
+        root = require_project_root()
+        rows = list_assumptions(root)
+    except (FileNotFoundError, OSError) as e:
+        return emit(error(str(e), code="assumption_list"))
+    return emit(success(rows, meta={"surface": "terra.assumption.list"}))
+
+
+def cmd_assumption_show(args: argparse.Namespace) -> int:
+    try:
+        root = require_project_root()
+        data = describe_assumption(root, args.id)
+    except (ValueError, FileNotFoundError, OSError) as e:
+        return emit(error(str(e), code="assumption_show"))
+    return emit(success(data, meta={"surface": "terra.assumption.show"}))
+
+
+def cmd_assumption_get(args: argparse.Namespace) -> int:
+    try:
+        root = require_project_root()
+        reading = read_assumption(root, args.id)
+    except (ValueError, FileNotFoundError, OSError) as e:
+        return emit(error(str(e), code="assumption_get"))
+    if args.raw:
+        print(json.dumps(reading.get("value")))
+        return 0
+    return emit(success(reading, meta={"surface": "terra.assumption.get"}))
+
+
+def cmd_assumption_set(args: argparse.Namespace) -> int:
+    try:
+        root = require_project_root()
+        current = read_assumption(root, args.id)
+        value = _parse_assumption_value(args.value, str(current.get("type")))
+        _announce_write_target(root, "assumption set")
+        set_assumption(root, args.id, value=value, reason=args.reason)
+        reading = read_assumption(root, args.id)
+    except (ValueError, FileNotFoundError, OSError) as e:
+        return emit(error(str(e), code="assumption_set"))
+    return emit(success(reading, meta={"surface": "terra.assumption.set"}))
+
+
+def cmd_assumption_link_probe(args: argparse.Namespace) -> int:
+    try:
+        root = require_project_root()
+        _announce_write_target(root, "assumption link-probe")
+        rec = link_probe_assumption(root, args.id, args.probe_id)
+    except (ValueError, FileNotFoundError, OSError) as e:
+        return emit(error(str(e), code="assumption_link_probe"))
+    return emit(success(rec, meta={"surface": "terra.assumption.link_probe"}))
+
+
+def cmd_assumption_link_run(args: argparse.Namespace) -> int:
+    try:
+        root = require_project_root()
+        _announce_write_target(root, "assumption link-run")
+        rec = link_run_assumption(root, args.id, args.run_id)
+    except (ValueError, FileNotFoundError, OSError) as e:
+        return emit(error(str(e), code="assumption_link_run"))
+    return emit(success(rec, meta={"surface": "terra.assumption.link_run"}))
+
+
+def cmd_assumption_unlink_run(args: argparse.Namespace) -> int:
+    try:
+        root = require_project_root()
+        _announce_write_target(root, "assumption unlink-run")
+        rec = unlink_run_assumption(root, args.id, args.run_id)
+    except (ValueError, FileNotFoundError, OSError) as e:
+        return emit(error(str(e), code="assumption_unlink_run"))
+    return emit(success(rec, meta={"surface": "terra.assumption.unlink_run"}))
+
+
+def cmd_assumption_graduate(args: argparse.Namespace) -> int:
+    from .knowns import graduate_unknown
+
+    try:
+        root = require_project_root()
+        _announce_write_target(root, "assumption graduate")
+        rec = graduate_unknown(root, args.id, known_id=args.as_id)
+    except (ValueError, FileExistsError, FileNotFoundError, OSError) as e:
+        return emit(error(str(e), code="assumption_graduate"))
+    return emit(success(rec, meta={"surface": "terra.assumption.graduate"}))
+
+
+def cmd_assumption_delete(args: argparse.Namespace) -> int:
+    try:
+        root = require_project_root()
+        from .assumptions import load_assumption
+
+        load_assumption(root, args.id)
+        _announce_write_target(root, "assumption delete")
+        path = delete_unknown(root, args.id)
+    except (ValueError, FileNotFoundError, OSError) as e:
+        return emit(error(str(e), code="assumption_delete"))
+    return emit(
+        success(
+            {"id": args.id, "deleted": True},
+            meta={"surface": "terra.assumption.delete", "path": str(path)},
+        )
+    )
+
+
+def cmd_calculation_create(args: argparse.Namespace) -> int:
+    try:
+        root, _ = ensure_project_root()
+        inputs = parse_bindings(args.input or [])
+        outputs = parse_output_specs(args.output or [])
+        if args.profile == "expression" and outputs:
+            raise ValueError("--output is for profile=model; use --type/--quantity")
+        if args.profile == "model" and (args.type or args.quantity or args.decimals is not None):
+            raise ValueError(
+                "profile=model uses repeatable --output; --type/--quantity/--decimals are expression options"
+            )
+        _announce_write_target(root, "calculation create")
+        path = create_calculation(
+            root,
+            args.id,
+            inputs=inputs,
+            output_type=args.type,
+            quantity=args.quantity,
+            unit=args.unit or "",
+            purpose=args.purpose or "",
+            force=args.force,
+            decimal_places=args.decimals,
+            profile=args.profile,
+            outputs=outputs,
+        )
+        rec = load_calculation(root, args.id)
+    except (ValueError, FileExistsError, OSError) as exc:
+        return emit(error(str(exc), code="calculation_create"))
+    return emit(success(rec, meta={"surface": "terra.calculation.create", "path": str(path)}))
+
+
+def cmd_calculation_validate(args: argparse.Namespace) -> int:
+    try:
+        root = require_project_root()
+        if args.id:
+            result = validate_calculation(root, args.id)
+        else:
+            rows = list_calculations(root)
+            result = {"ok": all(r["ok"] for r in rows), "calculations": rows}
+    except (ValueError, FileNotFoundError, OSError) as exc:
+        return emit(error(str(exc), code="calculation_validate"))
+    emit(success(result, meta={"surface": "terra.calculation.validate"}))
+    return 0 if result["ok"] else 1
+
+
+def cmd_calculation_run(args: argparse.Namespace) -> int:
+    try:
+        root = require_project_root()
+        _announce_write_target(root, "calculation run")
+        result = run_calculation(root, args.id)
+    except (ValueError, FileNotFoundError, OSError) as exc:
+        return emit(error(str(exc), code="calculation_run"))
+    return emit(success(result, meta={"surface": "terra.calculation.run"}))
+
+
+def cmd_calculation_get(args: argparse.Namespace) -> int:
+    try:
+        root = require_project_root()
+        result = get_calculation(root, args.id)
+    except (ValueError, FileNotFoundError, OSError) as exc:
+        return emit(error(str(exc), code="calculation_get"))
+    if args.raw:
+        print(json.dumps(result["value"]))
+        return 0
+    return emit(success(result, meta={"surface": "terra.calculation.get"}))
+
+
+def cmd_calculation_show(args: argparse.Namespace) -> int:
+    try:
+        root = require_project_root()
+        rec = load_calculation(root, args.id)
+        validation = validate_calculation(root, args.id)
+    except (ValueError, FileNotFoundError, OSError) as exc:
+        return emit(error(str(exc), code="calculation_show"))
+    return emit(success({"record": rec, "validation": validation}, meta={"surface": "terra.calculation.show"}))
+
+
+def cmd_calculation_list(args: argparse.Namespace) -> int:
+    try:
+        root = require_project_root()
+        rows = list_calculations(root)
+    except (ValueError, FileNotFoundError, OSError) as exc:
+        return emit(error(str(exc), code="calculation_list"))
+    return emit(success(rows, meta={"surface": "terra.calculation.list"}))
+
+
+def cmd_calculation_delete(args: argparse.Namespace) -> int:
+    try:
+        root = require_project_root()
+        _announce_write_target(root, "calculation delete")
+        path = delete_calculation(root, args.id)
+    except (ValueError, FileNotFoundError, OSError) as exc:
+        return emit(error(str(exc), code="calculation_delete"))
+    return emit(success({"id": args.id, "deleted": True}, meta={"surface": "terra.calculation.delete", "path": str(path)}))
 
 
 def cmd_unknown_show(args: argparse.Namespace) -> int:
@@ -1475,6 +1749,7 @@ def cmd_cohort_create(args: argparse.Namespace) -> int:
     try:
         root = require_project_root()
         members = [m.strip() for m in (args.members or "").split(",") if m.strip()]
+        _announce_write_target(root, "cohort create")
         rec = create_cohort(root, args.id, members=members, title=args.title or "")
     except (ValueError, FileExistsError, FileNotFoundError, OSError) as e:
         print(f"error: {e}", file=sys.stderr)
@@ -1495,11 +1770,50 @@ def cmd_cohort_add(args: argparse.Namespace) -> int:
 
     try:
         root = require_project_root()
+        _announce_write_target(root, "cohort add")
         rec = add_member(root, args.id, args.known_id)
     except (ValueError, FileNotFoundError, OSError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
     print(f"cohort {rec['id']}  members={', '.join(rec['members'])}")
+    return 0
+
+
+def cmd_cohort_set(args: argparse.Namespace) -> int:
+    from .cohorts import set_cohort
+
+    try:
+        root = require_project_root()
+        members = None
+        if args.members is not None:
+            members = [m.strip() for m in args.members.split(",") if m.strip()]
+        _announce_write_target(root, "cohort set")
+        rec = set_cohort(root, args.id, members=members, title=args.title)
+    except (ValueError, FileNotFoundError, OSError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(rec, indent=2, sort_keys=True))
+        return 0
+    print(f"cohort {rec['id']}  members={', '.join(rec['members'])}")
+    return 0
+
+
+def cmd_cohort_delete(args: argparse.Namespace) -> int:
+    from .cohorts import delete_cohort
+
+    try:
+        root = require_project_root()
+        _announce_write_target(root, "cohort delete")
+        path = delete_cohort(root, args.id)
+    except (FileNotFoundError, OSError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps({"id": args.id, "deleted": True, "path": str(path)}, indent=2, sort_keys=True))
+        return 0
+    print(f"deleted cohort {args.id}  ({path})")
+    print("  member knowns and their evidence were preserved")
     return 0
 
 
@@ -1559,6 +1873,7 @@ def cmd_cohort_link_run(args: argparse.Namespace) -> int:
 
     try:
         root = require_project_root()
+        _announce_write_target(root, "cohort link-run")
         out = link_run_cohort(root, args.id, args.run_id)
     except (ValueError, FileNotFoundError, OSError) as e:
         print(f"error: {e}", file=sys.stderr)
@@ -2944,7 +3259,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="terra",
         description=(
             "Terra — above Cartograph: brief (SSOT) + route (tasks) + map (survey). "
-            "Typed knowns/unknowns; probes; experiment sessions."
+            "Typed knowns/unknowns, assumptions, calculations, probes, and sessions."
         ),
     )
     p.add_argument("--version", action="version", version=f"terra {__version__}")
@@ -3042,7 +3357,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_mst.set_defaults(func=cmd_map_status)
 
     p_init = sub.add_parser(
-        "init", help="Create .terra/map (probes + unknowns) in this project"
+        "init", help="Create Terra map stores in this project"
     )
     p_init.add_argument(
         "path", nargs="?", default=None, help="Project directory (default: cwd)"
@@ -3077,6 +3392,13 @@ def build_parser() -> argparse.ArgumentParser:
             "--force",
             action="store_true",
             help="Overwrite probe.json / probe.py if present",
+        )
+        sp.add_argument(
+            "--input",
+            action="append",
+            default=None,
+            metavar="NAME=known:ID|assumption:ID",
+            help="Declared map input injected as ctx['inputs'][NAME] (repeatable)",
         )
         sp.set_defaults(func=cmd_probe_create)
 
@@ -3267,8 +3589,8 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         dest="vars",
         default=None,
-        metavar="NAME=QTY[:kind]",
-        help="For formula: bind var (repeatable), e.g. --var h=hostile_count",
+        metavar="NAME=QTY[:kind]|NAME=known:ID",
+        help="For formula: bind a run quantity or live known (repeatable)",
     )
     p_uc.add_argument("--unit", default="", help="Optional unit for number type")
     p_uc.add_argument(
@@ -3389,6 +3711,135 @@ def build_parser() -> argparse.ArgumentParser:
     p_uv.add_argument("id", nargs="?", default=None)
     p_uv.add_argument("--json", action="store_true")
     p_uv.set_defaults(func=cmd_unknown_validate)
+
+    # --- assumptions (unresolved but consumable; always conditional) ---
+    p_asm = sub.add_parser(
+        "assumption",
+        help="Provisional consumable values; progress continues but stays conditional",
+    )
+    asm_sub = p_asm.add_subparsers(dest="assumption_cmd", required=True)
+
+    p_ac = asm_sub.add_parser("create", help="Create a provisional typed value")
+    p_ac.add_argument("id", help="Assumption slug")
+    p_ac.add_argument("--claim", required=True)
+    p_ac.add_argument("--type", required=True, choices=["number", "boolean"])
+    p_ac.add_argument("--quantity", required=True)
+    p_ac.add_argument("--value", required=True, help="JSON scalar, e.g. 0.85 or true")
+    p_ac.add_argument("--unit", default="")
+    p_ac.add_argument("--reason", required=True, help="Why this provisional basis is acceptable")
+    p_ac.add_argument("--evidence", required=True, help="What would replace it with a known")
+    p_ac.add_argument("--probe", default=None)
+    p_ac.add_argument("--notes", default="")
+    p_ac.add_argument("--force", action="store_true")
+    p_ac.set_defaults(func=cmd_assumption_create)
+
+    p_al = asm_sub.add_parser("list", help="List assumptions")
+    p_al.set_defaults(func=cmd_assumption_list)
+
+    p_ash = asm_sub.add_parser("show", help="Show assumption, evidence, and reading")
+    p_ash.add_argument("id")
+    p_ash.add_argument("--json", action="store_true")
+    p_ash.set_defaults(func=cmd_assumption_show)
+
+    p_ag = asm_sub.add_parser("get", help="Read conditional value for composition")
+    p_ag.add_argument("id")
+    p_ag.add_argument("--raw", action="store_true")
+    p_ag.set_defaults(func=cmd_assumption_get)
+
+    p_aset = asm_sub.add_parser("set", help="Revise provisional value with history")
+    p_aset.add_argument("id")
+    p_aset.add_argument("--value", required=True, help="JSON scalar")
+    p_aset.add_argument("--reason", required=True)
+    p_aset.set_defaults(func=cmd_assumption_set)
+
+    p_alp = asm_sub.add_parser("link-probe", help="Attach an evidence instrument")
+    p_alp.add_argument("id")
+    p_alp.add_argument("probe_id")
+    p_alp.set_defaults(func=cmd_assumption_link_probe)
+
+    p_alr = asm_sub.add_parser("link-run", help="Attach evidence without replacing the assumption")
+    p_alr.add_argument("id")
+    p_alr.add_argument("run_id")
+    p_alr.set_defaults(func=cmd_assumption_link_run)
+
+    p_aur = asm_sub.add_parser("unlink-run", help="Detach evidence run")
+    p_aur.add_argument("id")
+    p_aur.add_argument("run_id")
+    p_aur.set_defaults(func=cmd_assumption_unlink_run)
+
+    p_agr = asm_sub.add_parser("graduate", help="Replace assumption with an evidence-backed known")
+    p_agr.add_argument("id")
+    p_agr.add_argument("--as", dest="as_id", default=None)
+    p_agr.set_defaults(func=cmd_assumption_graduate)
+
+    p_ad = asm_sub.add_parser("delete", help="Delete assumption record")
+    p_ad.add_argument("id")
+    p_ad.set_defaults(func=cmd_assumption_delete)
+
+    # --- calculations (inside-map composition; declared map values only) ---
+    p_calc = sub.add_parser(
+        "calculation",
+        aliases=["calc"],
+        help="Compose declared knowns and assumptions with validated Python",
+    )
+    calc_sub = p_calc.add_subparsers(dest="calculation_cmd", required=True)
+
+    p_cc = calc_sub.add_parser("create", help="Scaffold a map-native calculation")
+    p_cc.add_argument("id")
+    p_cc.add_argument(
+        "--profile",
+        choices=["expression", "model"],
+        default="expression",
+    )
+    p_cc.add_argument(
+        "--input",
+        action="append",
+        required=True,
+        metavar="NAME=known:ID|assumption:ID",
+    )
+    p_cc.add_argument("--type", choices=["number", "boolean"])
+    p_cc.add_argument("--quantity")
+    p_cc.add_argument(
+        "--output",
+        action="append",
+        default=None,
+        metavar="NAME=number|boolean:QUANTITY[:UNIT]",
+        help="Declared model output (repeatable)",
+    )
+    p_cc.add_argument("--unit", default="")
+    p_cc.add_argument(
+        "--decimals",
+        type=int,
+        default=None,
+        help="Presentation decimal places (raw value remains full precision)",
+    )
+    p_cc.add_argument("--purpose", default="")
+    p_cc.add_argument("--force", action="store_true")
+    p_cc.set_defaults(func=cmd_calculation_create)
+
+    p_cv = calc_sub.add_parser("validate", help="Validate calculation package(s)")
+    p_cv.add_argument("id", nargs="?", default=None)
+    p_cv.set_defaults(func=cmd_calculation_validate)
+
+    p_cr = calc_sub.add_parser("run", help="Resolve inputs and stamp a result")
+    p_cr.add_argument("id")
+    p_cr.set_defaults(func=cmd_calculation_run)
+
+    p_cg = calc_sub.add_parser("get", help="Read latest result; refuses stale")
+    p_cg.add_argument("id")
+    p_cg.add_argument("--raw", action="store_true")
+    p_cg.set_defaults(func=cmd_calculation_get)
+
+    p_cs = calc_sub.add_parser("show", help="Show definition, history, and validation")
+    p_cs.add_argument("id")
+    p_cs.set_defaults(func=cmd_calculation_show)
+
+    p_cl = calc_sub.add_parser("list", help="List calculations and freshness")
+    p_cl.set_defaults(func=cmd_calculation_list)
+
+    p_cd = calc_sub.add_parser("delete", help="Delete calculation package")
+    p_cd.add_argument("id")
+    p_cd.set_defaults(func=cmd_calculation_delete)
 
     # --- suites (composition recipes) ---
     p_suite = sub.add_parser(
@@ -4011,6 +4462,26 @@ def build_parser() -> argparse.ArgumentParser:
     p_ca.add_argument("id", help="Cohort slug")
     p_ca.add_argument("known_id", help="Known id to add")
     p_ca.set_defaults(func=cmd_cohort_add)
+
+    p_cs = coh_sub.add_parser(
+        "set", help="Edit title and/or replace the complete member set"
+    )
+    p_cs.add_argument("id", help="Cohort slug")
+    p_cs.add_argument(
+        "--members",
+        metavar="K1,K2",
+        help="Replacement member known ids (must exist on this map)",
+    )
+    p_cs.add_argument("--title", default=None)
+    p_cs.add_argument("--json", action="store_true")
+    p_cs.set_defaults(func=cmd_cohort_set)
+
+    p_cd = coh_sub.add_parser(
+        "delete", help="Delete a cohort declaration; member knowns are preserved"
+    )
+    p_cd.add_argument("id", help="Cohort slug")
+    p_cd.add_argument("--json", action="store_true")
+    p_cd.set_defaults(func=cmd_cohort_delete)
 
     p_cl = coh_sub.add_parser("list", help="List cohorts with consistency")
     p_cl.add_argument("--json", action="store_true")

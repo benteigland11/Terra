@@ -219,6 +219,18 @@ def create_known(
             "created_at": now,
             "updated_at": now,
         }
+        bound_known_ids = [
+            str(spec.get("known_id"))
+            for spec in vars_spec.values()
+            if isinstance(spec, dict) and spec.get("known_id")
+        ]
+        if known_id in bound_known_ids:
+            raise ValueError(f"formula known {known_id!r} cannot bind to itself")
+        if bound_known_ids:
+            record["deps"] = {
+                "knowns": [{"id": kid, "as_of": None} for kid in bound_known_ids],
+                "files": [],
+            }
     else:
         if not quantity or not str(quantity).strip():
             raise ValueError(f"quantity is required for type={map_type}")
@@ -254,7 +266,14 @@ def create_known(
             "updated_at": now,
         }
     for rid in all_run_ids:
-        if not (run_dir(project_root, rid) / RUN_META_NAME).is_file():
+        meta_path = run_dir(project_root, rid) / RUN_META_NAME
+        if not meta_path.is_file() and map_type == "formula":
+            from .paths import find_run_dir
+
+            visible = find_run_dir(project_root, rid)
+            if visible is not None:
+                meta_path = visible[0] / RUN_META_NAME
+        if not meta_path.is_file():
             raise FileNotFoundError(f"run not found: {rid}")
     if origin_unknown_id:
         record["origin_unknown_id"] = origin_unknown_id
@@ -266,6 +285,10 @@ def create_known(
     record = recompute_typed_node(
         record, project_root=project_root, run_dir_fn=run_dir
     )
+    if record.get("deps"):
+        from .staleness import stamp_deps
+
+        stamp_deps(project_root, record)
     ok, _ = can_claim_confidence(
         record["stats"], confidence, map_type=map_type
     )
@@ -280,10 +303,18 @@ def create_known(
     return path
 
 
-def _live_runs(project_root: Path, run_ids: list[str]) -> list[str]:
+def _live_runs(
+    project_root: Path, run_ids: list[str], *, through_parents: bool = False
+) -> list[str]:
     out: list[str] = []
     for rid in run_ids or []:
         meta_path = run_dir(project_root, rid) / RUN_META_NAME
+        if not meta_path.is_file() and through_parents:
+            from .paths import find_run_dir
+
+            visible = find_run_dir(project_root, rid)
+            if visible is not None:
+                meta_path = visible[0] / RUN_META_NAME
         if not meta_path.is_file():
             continue
         try:
@@ -392,7 +423,11 @@ def graduate_unknown(
     all_runs: list[str] = []
     all_probes: list[str] = []
     for unk in contributors:
-        for rid in _live_runs(project_root, list(unk.get("run_ids") or [])):
+        for rid in _live_runs(
+            project_root,
+            list(unk.get("run_ids") or []),
+            through_parents=mtype == "formula",
+        ):
             if rid not in all_runs:
                 all_runs.append(rid)
         for pid in unk.get("probe_ids") or []:
@@ -570,12 +605,19 @@ def link_run_known(
     *,
     primary: bool = False,
 ) -> dict[str, Any]:
-    if not (run_dir(project_root, run_id) / RUN_META_NAME).is_file():
-        raise FileNotFoundError(f"run not found: {run_id}")
     rec = load_known(project_root, known_id)
+    meta_path = run_dir(project_root, run_id) / RUN_META_NAME
+    if not meta_path.is_file() and rec.get("type") == "formula":
+        from .paths import find_run_dir
+
+        visible = find_run_dir(project_root, run_id)
+        if visible is not None:
+            meta_path = visible[0] / RUN_META_NAME
+    if not meta_path.is_file():
+        raise FileNotFoundError(f"run not found: {run_id}")
     try:
         meta = json.loads(
-            (run_dir(project_root, run_id) / RUN_META_NAME).read_text(encoding="utf-8")
+            meta_path.read_text(encoding="utf-8")
         )
         if meta.get("voided"):
             raise ValueError(
@@ -1036,6 +1078,17 @@ def set_known(
         if rec.get("type") != "formula":
             raise ValueError("cannot set --var on non-formula known")
         rec["vars"] = parse_vars_arg(vars)
+        bound_known_ids = [
+            str(spec.get("known_id"))
+            for spec in rec["vars"].values()
+            if isinstance(spec, dict) and spec.get("known_id")
+        ]
+        if known_id in bound_known_ids:
+            raise ValueError(f"formula known {known_id!r} cannot bind to itself")
+        rec["deps"] = {
+            "knowns": [{"id": kid, "as_of": None} for kid in bound_known_ids],
+            "files": list((rec.get("deps") or {}).get("files") or []),
+        }
         changed = True
     if map_type is not None and map_type != rec.get("type"):
         raise ValueError(
@@ -1071,6 +1124,10 @@ def set_known(
             "(freehand --value is rejected; see terra known set --help)"
         )
 
+    if vars is not None and rec.get("deps"):
+        from .staleness import stamp_deps
+
+        stamp_deps(project_root, rec)
     save_known(project_root, rec)
     return load_known(project_root, known_id), "updated"
 

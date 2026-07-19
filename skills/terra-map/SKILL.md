@@ -4,7 +4,7 @@ description: >
   Router for Terra program+map work when the specific surface is unclear, or
   when the user says "terra-map" / "use terra". Prefer the focused skill when
   known: terra-start (init), terra-brief (needs/enablers/propose), terra-route
-  (DAG/lead loop/complete), terra-survey (unknown/known/plan/void), terra-scopes
+  (DAG/lead loop/complete), terra-survey (unknown/assumption/known/calculation/plan/void), terra-scopes
   (global vs session), terra-probe (probe.py). Fire on general Terra campaign
   questions, "how do I use terra here", or mixed brief+route+map in one turn —
   then open the matching child skill(s). Does NOT replace those skills; does
@@ -21,7 +21,7 @@ Procedure is split so each skill is one job. **Open the child skill** and follow
 | **terra-start** | `terra init` + brief + route skeleton + budget |
 | **terra-brief** | needs, deliverables, enablers, **budget_points**, propose/accept |
 | **terra-route** | lead loop, buckets 3/8/21, **lock-plan / set-effort / budget** |
-| **terra-survey** (incl. `terra design` baseline + artifacts) | unknown → probe run → known/plan → void; types |
+| **terra-survey** (incl. `terra design` baseline + artifacts) | unknown/assumption → evidence → known; calculation composition; plan/void |
 | **terra-scopes** | global vs session maps |
 | **terra-probe** | implement/validate/run instruments |
 

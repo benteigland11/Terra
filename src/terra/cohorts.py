@@ -137,6 +137,47 @@ def add_member(
     return load_cohort(project_root, cohort_id)
 
 
+def set_cohort(
+    project_root: Path,
+    cohort_id: str,
+    *,
+    members: list[str] | None = None,
+    title: str | None = None,
+) -> dict[str, Any]:
+    """Update cohort metadata or replace its coupled-known membership."""
+    rec = load_cohort(project_root, cohort_id)
+    if members is None and title is None:
+        raise ValueError("cohort set needs --members and/or --title")
+    if members is not None:
+        seen: list[str] = []
+        for kid in members:
+            if kid in seen:
+                continue
+            _load_known(project_root, kid)
+            other = find_cohort_for(project_root, kid)
+            if other is not None and other.get("id") != cohort_id:
+                raise ValueError(
+                    f"known {kid} already belongs to cohort {other.get('id')!r}"
+                )
+            seen.append(kid)
+        if not seen:
+            raise ValueError("cohort needs at least one member known")
+        rec["members"] = seen
+    if title is not None:
+        rec["title"] = title.strip()
+    save_cohort(project_root, rec)
+    return load_cohort(project_root, cohort_id)
+
+
+def delete_cohort(project_root: Path, cohort_id: str) -> Path:
+    """Delete the coupling declaration without deleting its member knowns."""
+    path = cohort_path(project_root, cohort_id)
+    if not path.is_file():
+        raise FileNotFoundError(f"cohort not found: {cohort_id}")
+    path.unlink()
+    return path
+
+
 def adopt_cohort(
     project_root: Path, cohort_id: str, *, from_map: str
 ) -> dict[str, Any]:

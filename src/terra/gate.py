@@ -1,7 +1,7 @@
 """Mechanical release gate — debts fail the gate, no judgment calls.
 
 ``terra gate`` exits 0 only when every map is clean:
-  - no active unknowns flagged blocks_build
+  - no active unknowns (assumptions are non-blocking but loud notices)
   - no unbacked knowns (evidence voided/unlinked away)
   - no stale knowns (dependency moved without re-derivation)
   - no knowns whose independent methods disagree beyond tolerance
@@ -38,6 +38,7 @@ def _collect_map_violations(
     from .plans import list_plans
     from .staleness import compute_staleness
     from .unknowns import list_unknowns
+    from .calculations import list_calculations
 
     violations: list[dict[str, Any]] = []
     notices: list[dict[str, Any]] = []
@@ -46,21 +47,34 @@ def _collect_map_violations(
         knowns = list_knowns(project_root)
         plans = list_plans(project_root)
         stale = compute_staleness(project_root)
+        calculations = list_calculations(project_root)
         for v in cohort_violations(project_root):
             violations.append({**v, "map_id": map_id})
 
     for u in unknowns:
         rec = u.get("record") or {}
-        if rec.get("status") in ("open", "probing", "blocked") and rec.get(
-            "blocks_build"
-        ):
+        if rec.get("status") not in ("open", "probing", "blocked"):
+            continue
+        if rec.get("role", "unknown") == "assumption":
+            notices.append(
+                {
+                    "kind": "assumption_active",
+                    "id": rec.get("id") or u.get("id"),
+                    "map_id": map_id,
+                    "why": (
+                        f"active assumption: {(rec.get('claim') or '')[:80]} "
+                        f"(value={rec.get('assumed_value')!r})"
+                    ),
+                }
+            )
+        else:
             violations.append(
                 {
                     "kind": "unknown_blocking",
                     "id": rec.get("id") or u.get("id"),
                     "map_id": map_id,
                     "why": (
-                        f"blocks_build unknown still {rec.get('status')}: "
+                        f"unknown still {rec.get('status')}: "
                         f"{(rec.get('claim') or '')[:80]}"
                     ),
                 }
@@ -70,6 +84,30 @@ def _collect_map_violations(
         rec = k.get("record") or {}
         kid = rec.get("id") or k.get("id")
         n = (rec.get("stats") or {}).get("n") or 0
+        from .run_inputs import record_input_state
+
+        evidence_inputs = record_input_state(project_root, rec)
+        if evidence_inputs["stale"]:
+            violations.append(
+                {
+                    "kind": "evidence_input_stale",
+                    "id": kid,
+                    "map_id": map_id,
+                    "why": f"known {kid} uses runs with stale declared inputs",
+                }
+            )
+        if evidence_inputs["conditional"]:
+            notices.append(
+                {
+                    "kind": "known_conditional",
+                    "id": kid,
+                    "map_id": map_id,
+                    "why": (
+                        f"known {kid} depends on assumption-conditioned evidence: "
+                        + ", ".join(evidence_inputs["assumptions"])
+                    ),
+                }
+            )
         if not (rec.get("run_ids") or []) or n == 0:
             violations.append(
                 {
@@ -135,6 +173,43 @@ def _collect_map_violations(
                         f"plan {rec.get('id')}: "
                         f"{pl.get('satisfied_count')}/{pl.get('leg_count')} "
                         f"legs satisfied"
+                    ),
+                }
+            )
+
+    for calculation in calculations:
+        cid = calculation.get("id")
+        if not calculation.get("ok"):
+            violations.append(
+                {
+                    "kind": "calculation_invalid",
+                    "id": cid,
+                    "map_id": map_id,
+                    "why": "; ".join(calculation.get("blocks") or []),
+                }
+            )
+            continue
+        staleness = calculation.get("staleness") or {}
+        if staleness.get("stale"):
+            violations.append(
+                {
+                    "kind": "calculation_stale",
+                    "id": cid,
+                    "map_id": map_id,
+                    "why": "; ".join(staleness.get("reasons") or []),
+                }
+            )
+            continue
+        latest = ((calculation.get("record") or {}).get("latest") or {})
+        if latest.get("conditional"):
+            notices.append(
+                {
+                    "kind": "calculation_conditional",
+                    "id": cid,
+                    "map_id": map_id,
+                    "why": (
+                        f"calculation {cid} depends on assumptions: "
+                        + ", ".join(latest.get("assumptions") or [])
                     ),
                 }
             )

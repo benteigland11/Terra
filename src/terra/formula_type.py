@@ -61,6 +61,7 @@ def parse_vars_arg(raw: str | list[str] | dict[str, Any] | None) -> dict[str, di
 
     CLI forms (repeatable ``--var``):
       h=hostile_count
+      limit=known:spec_hostile_limit
       h:hostile_count
       h=hostile_count:number
       b=rcon_up:boolean
@@ -74,9 +75,15 @@ def parse_vars_arg(raw: str | list[str] | dict[str, Any] | None) -> dict[str, di
                 out[str(name)] = {"quantity": spec}
             elif isinstance(spec, dict):
                 q = spec.get("quantity")
-                if not isinstance(q, str) or not q.strip():
-                    raise ValueError(f"var {name!r} needs quantity")
-                entry: dict[str, str] = {"quantity": q.strip()}
+                known_id = spec.get("known_id") or spec.get("known")
+                if isinstance(known_id, str) and known_id.strip():
+                    if isinstance(q, str) and q.strip():
+                        raise ValueError(f"var {name!r} cannot bind quantity and known")
+                    entry = {"known_id": known_id.strip()}
+                elif isinstance(q, str) and q.strip():
+                    entry = {"quantity": q.strip()}
+                else:
+                    raise ValueError(f"var {name!r} needs quantity or known_id")
                 kind = spec.get("kind") or spec.get("type")
                 if isinstance(kind, str) and kind.strip():
                     entry["kind"] = kind.strip()
@@ -103,6 +110,12 @@ def parse_vars_arg(raw: str | list[str] | dict[str, Any] | None) -> dict[str, di
         if not name.isidentifier():
             raise ValueError(f"var name must be identifier, got {name!r}")
         kind = None
+        if rest.startswith("known:"):
+            known_id = rest.removeprefix("known:").strip()
+            if not known_id:
+                raise ValueError(f"var {name!r} missing known id")
+            out[name] = {"known_id": known_id}
+            continue
         if ":" in rest:
             quantity, kind = rest.rsplit(":", 1)
             quantity, kind = quantity.strip(), kind.strip()
@@ -144,10 +157,17 @@ def validate_formula_fields(
                 blocks.append(f"vars[{name}] must be an object")
                 continue
             q = spec.get("quantity")
-            if not isinstance(q, str) or not q.strip():
-                blocks.append(f"vars[{name}].quantity required")
+            known_id = spec.get("known_id")
+            has_q = isinstance(q, str) and bool(q.strip())
+            has_known = isinstance(known_id, str) and bool(known_id.strip())
+            if has_q == has_known:
+                blocks.append(
+                    f"vars[{name}] needs exactly one of quantity or known_id"
+                )
             kind = spec.get("kind") or spec.get("type")
-            if kind is not None and kind not in ("number", "boolean"):
+            if has_known and kind is not None:
+                blocks.append(f"vars[{name}].kind is inferred from its known")
+            elif kind is not None and kind not in ("number", "boolean"):
                 blocks.append(
                     f"vars[{name}].kind must be number|boolean when set"
                 )
@@ -433,10 +453,33 @@ def recompute_formula_node(
     k_skip = 0
     n_data_runs = 0
 
+    known_values: dict[str, Any] = {}
+    input_assumptions: set[str] = set()
+    for name, spec in vars_spec.items():
+        if not isinstance(spec, dict) or not spec.get("known_id"):
+            continue
+        from .readings import read_known
+
+        reading = read_known(
+            project_root,
+            str(spec["known_id"]),
+            min_conf="low",
+            consumer=f"formula:{record.get('id') or 'unknown'}",
+            record=False,
+        )
+        known_values[str(name)] = reading.get("value")
+        input_assumptions.update(reading.get("assumptions") or [])
+
     for rid in record.get("run_ids") or []:
         if not isinstance(rid, str):
             continue
         rdir = run_dir_fn(project_root, rid)
+        if not rdir.is_dir():
+            from .paths import find_run_dir
+
+            visible = find_run_dir(project_root, rid)
+            if visible is not None:
+                rdir = visible[0]
         meta_path = rdir / RUN_META_NAME
         entry: dict[str, Any] = {"run_id": rid}
         if not meta_path.is_file():
@@ -456,6 +499,16 @@ def recompute_formula_node(
             k_skip += 1
             by_run.append(entry)
             continue
+        from .run_inputs import run_input_state
+
+        input_state = run_input_state(project_root, meta)
+        if input_state["stale"]:
+            entry["stale_inputs"] = True
+            entry["stale_reasons"] = input_state["reasons"]
+            k_skip += 1
+            by_run.append(entry)
+            continue
+        input_assumptions.update(input_state["assumptions"])
 
         run_env: dict[str, list[Any]] = {}
         any_vals = False
@@ -465,7 +518,10 @@ def recompute_formula_node(
             q = str(spec.get("quantity") or "").strip()
             kind = (spec.get("kind") or spec.get("type") or "").strip() or None
             name_s = str(name)
-            if kind == "boolean":
+            if name_s in known_values:
+                value = known_values[name_s]
+                vals = [] if value is None else [value]
+            elif kind == "boolean":
                 vals: list[Any] = extract_boolean_measures_from_run_meta(
                     meta, quantity=q
                 )
@@ -527,6 +583,9 @@ def recompute_formula_node(
     holds_agg = None
     value_agg = None
     bindings_agg: dict[str, Any] = {}
+    for name, value in known_values.items():
+        if value is not None:
+            env[name] = [value]
     if expression and any(env.values()):
         try:
             value_agg, bindings_agg = evaluate_expression(expression, env)
@@ -540,6 +599,8 @@ def recompute_formula_node(
 
     record = dict(record)
     record["stats"] = stats
+    record["conditional"] = bool(input_assumptions)
+    record["assumptions"] = sorted(input_assumptions)
     record["confidence_derived"] = derive_confidence_formula(stats)
     claimed = record.get("confidence") or "low"
     if claimed not in CONFIDENCE_SET:

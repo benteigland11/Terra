@@ -41,7 +41,7 @@ Agent envelope follows Cartograph (`universal-agent-response`):
 `{status, data, meta?}` with `data.attention` + `data.next_actions`.  
 See [docs/agent-io.md](docs/agent-io.md), [docs/maps.md](docs/maps.md).
 
-## Probes + unknowns (now)
+## Probes + unknowns + assumptions
 
 ```bash
 cd /your/modded-minecraft-project
@@ -70,12 +70,64 @@ Layout:
   map/
     probes/<id>/          # SHARED instruments
     lib/                  # SHARED helpers
-    unknowns/ knowns/ runs/ suites/   # global beliefs
+    unknowns/ knowns/ calculations/ runs/ suites/   # global map state
     sessions/<exp>/       # experiment-scoped beliefs + evidence
 ```
 
 **Level-1 probe validation:** input `to` → output `to`/`status`/`artifacts` (loud I/O steps).  
 **Unknown validation:** claim, evidence_needed when open, no silent resolve.
+
+Unknowns are hard gates. When design must proceed on a declared provisional
+number or boolean, use an **assumption** instead:
+
+```bash
+terra assumption create efficiency --type number --quantity efficiency \
+  --value 0.90 --claim "What efficiency will the converter sustain?" \
+  --reason "Working vendor-class basis" --evidence "Bench measurement"
+terra assumption get efficiency       # conditional=true; never a clean known
+terra assumption set efficiency --value 0.86 --reason "EOL derating basis"
+terra assumption graduate efficiency  # requires linked evidence; known uses evidence
+```
+
+Assumptions keep progress moving but remain loud in map status and gate
+notices. See [docs/assumptions.md](docs/assumptions.md).
+
+### Calculations: map values → derived values
+
+Calculations compose only declared knowns and assumptions as external inputs.
+Formula literals are valid logic and are inventoried in stamped results:
+
+```bash
+terra calculation create area --input width=known:width \
+  --input height=assumption:working_height \
+  --type number --quantity area --unit m2 --decimals 2
+# edit .terra/map/calculations/area/calc.py
+terra calculation validate area
+terra calculation run area
+terra calculation get area
+```
+
+For example, `(1 / 2) * mass * velocity**2` is valid. Terra assumes competent
+formula authorship while keeping every external project value on the map.
+`--decimals` controls only the separate display value; raw calculation values
+remain full precision.
+
+Input or source changes make the result stale. Assumptions propagate into the
+result as explicit conditionality. See [docs/calculations.md](docs/calculations.md).
+
+For multi-output scientific or engineering packages, use the model profile:
+
+```bash
+terra calculation create trajectory --profile model \
+  --input mass=known:mass --input velocity=assumption:velocity \
+  --output energy=number:kinetic_energy:J \
+  --output moving=boolean:is_moving
+```
+
+Models support package-local and installed imports, typed output bundles,
+an explicit `health.ok` verdict, diagnostics, hashed artifacts, and
+runtime/dependency manifests. Failed health, changed/missing artifacts, or
+runtime dependency drift make the result unusable and block the gate.
 
 ### Run (stamped evidence)
 
@@ -86,6 +138,19 @@ terra run list
 ```
 
 Shared helpers: put modules in `.terra/map/lib/` (on `sys.path` during validate/run).
+
+Probes that require map configuration declare it rather than copying values:
+
+```bash
+terra probe create calibrated_sensor --purpose "Read calibrated output" \
+  --input scale=known:sensor_scale \
+  --input ambient=assumption:ambient_temperature
+# probe.py reads ctx["inputs"]
+```
+
+Runs stamp these inputs and become stale when they move. Assumptions contaminate
+the run, resulting known, and downstream compositions. See
+[docs/probe-inputs.md](docs/probe-inputs.md).
 
 **Recommended `to` envelope** (warn-only if `kind` missing on live runs):
 
@@ -179,7 +244,7 @@ terra known delete est
 
 See [docs/adjust.md](docs/adjust.md).
 
-**Product path:** `probes/` + `unknowns/` + `runs/` + `lib/` + `suites/`.  
-**Legacy:** `.terra/map/data/` (old capture sketch) — ignore for agents.
+**Product path:** `probes/` + `unknowns/` + `knowns/` + `calculations/` +
+`runs/` + `lib/` + `suites/`.
 
 See [docs/probe-level1.md](docs/probe-level1.md), [docs/unknowns.md](docs/unknowns.md).

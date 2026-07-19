@@ -11,9 +11,11 @@ from terra.cohorts import (
     check_cohort,
     cohort_violations,
     create_cohort,
+    delete_cohort,
     find_cohort_for,
     link_run_cohort,
     load_cohort,
+    set_cohort,
 )
 from terra.gate import check_gate
 from terra.knowns import graduate_unknown, link_run_known, load_known
@@ -186,3 +188,36 @@ def test_add_member(proj):
     # so the cohort stays consistent even though its stats come from the
     # same solve.
     assert check_cohort(proj, "sizing_set")["consistent"] is True
+
+
+def test_set_cohort_replaces_members_and_title(proj):
+    rid = _solve(proj)
+    _birth_pair(proj, rid)
+    rec = set_cohort(
+        proj, "sizing_set", members=["s_wing", "s_wing"], title="Wing only"
+    )
+    assert rec["members"] == ["s_wing"]
+    assert rec["title"] == "Wing only"
+    assert find_cohort_for(proj, "we") is None
+
+
+def test_set_cohort_refuses_empty_or_foreign_member(proj):
+    rid = _solve(proj)
+    _birth_pair(proj, rid)
+    with pytest.raises(ValueError, match="at least one member"):
+        set_cohort(proj, "sizing_set", members=[])
+    create_unknown(proj, "p_req", claim="P?", map_type="number", quantity="p_req")
+    link_run(proj, "p_req", rid)
+    graduate_unknown(proj, "p_req")
+    create_cohort(proj, "other", members=["p_req"])
+    with pytest.raises(ValueError, match="already belongs"):
+        set_cohort(proj, "sizing_set", members=["s_wing", "p_req"])
+
+
+def test_delete_cohort_preserves_knowns(proj):
+    rid = _solve(proj)
+    _birth_pair(proj, rid)
+    path = delete_cohort(proj, "sizing_set")
+    assert not path.exists()
+    assert load_known(proj, "we")["id"] == "we"
+    assert find_cohort_for(proj, "s_wing") is None

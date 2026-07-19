@@ -1,7 +1,8 @@
 """Read path for knowns — the single place a number lives.
 
-Probes, sheet generators, and models must import values from the map instead
-of hardcoding copies:
+Ad-hoc tools and legacy integrations must read values from the map instead of
+hardcoding copies. Terra calculations and declared-input probes receive values
+through their binding contracts:
 
   from terra.readings import known
   MTOW = known("mtow")["value"]          # loud if missing/unbacked/stale
@@ -223,6 +224,14 @@ def _read_known_here(
         )
 
     stats = rec.get("stats") or {}
+    from .run_inputs import record_input_state
+
+    evidence_inputs = record_input_state(project_root, rec)
+    if evidence_inputs["stale"] and not allow_stale:
+        raise ValueError(
+            f"known {known_id} has stale probe inputs — rerun the probe with "
+            f"current declared inputs: {evidence_inputs['stale_runs']}"
+        )
     n = stats.get("n") or 0
     if not (rec.get("run_ids") or []) or n == 0:
         raise ValueError(
@@ -318,6 +327,8 @@ def _read_known_here(
         "corroboration": corr,
         "uncertainty": corr.get("spread"),
         "band": corr.get("band"),
+        "conditional": bool(evidence_inputs["conditional"]),
+        "assumptions": list(evidence_inputs["assumptions"]),
         **({"cohort": cohort_info} if cohort_info else {}),
         # Only reachable with allow_superseded=True - flag loudly so a caller
         # reading a tombstoned value knows it is history, not current truth.

@@ -101,6 +101,7 @@ def init_probe(
     kind: str = "watch",
     duration_s: float | None = None,
     force: bool = False,
+    inputs: dict[str, str] | None = None,
 ) -> Path:
     if not _SLUG_RE.match(probe_id):
         raise ValueError(
@@ -146,6 +147,13 @@ def init_probe(
         "entry": PROBE_ENTRY_DEFAULT,
         "kind": kind,
     }
+    if inputs:
+        from .map_inputs import validate_map_bindings
+
+        blocks = validate_map_bindings(inputs)
+        if blocks:
+            raise ValueError("invalid probe inputs: " + "; ".join(blocks))
+        meta["inputs"] = inputs
     if kind == "watch":
         meta["duration_s"] = duration_s_val
 

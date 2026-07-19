@@ -2,6 +2,8 @@
 name: terra-survey
 description: >
   REQUIRED for Terra map beliefs and evidence: unknown create/link/resolve,
+  assumption create/get/set/link/graduate (conditional consumable values),
+  calculation create/validate/run/get (known+assumption composition),
   unknown graduate (known birth), known get/depend/tolerance/reaffirm/supersede/link/promote,
   corroboration (methods agree), cohorts (coupled knowns from one converged
   solve — create/check/link-run fan-out, mixed-set refusals),
@@ -22,10 +24,13 @@ Instruments: **terra-probe**. Program tasks: **terra-route**.
 
 ## Laws
 
-1. Under fog: do not freehand the domain — open an **unknown**.  
+1. Under fog: do not freehand the domain — open an **unknown**. Unknowns are
+   hard gates. If progress genuinely requires a provisional typed value, make
+   it an explicit **assumption** with a reason; never hide it in a probe.
 2. Validate alone ≠ surveyed — **run + link** is the reading.  
 3. n=1 cannot promote **high**; failed formula cannot promote as true.  
-4. Claim-shaped work (even closed-form models you wrote): unknown/known + **probe run** + link.  
+4. Outside claims need unknown → **probe run** → known. Deterministic map-to-map
+   models are calculations; do not manufacture probe evidence for arithmetic.
 5. Bare `python tools/…` is not evidence — `terra probe run`.  
 6. Resolve unknowns only with linked runs.
 7. Knowns are born only via `unknown graduate` — no run, no known.  
@@ -40,10 +45,12 @@ Instruments: **terra-probe**. Program tasks: **terra-route**.
    **safety- or constraint-shaped** known is a finding, not a detail: wire it to
    what it would knock over. A plain `depend` edge accepts a `low`/uncertain
    known (design params need ≥med) and still arms the cascade — that is the job.  
-10. `terra gate` is the debt collector: blocking unknowns, stale/unbacked
+10. `terra gate` is the debt collector: active unknowns, stale/unbacked
    knowns, disagreeing methods, incomplete plans mechanically fail it
    (deliverable route tasks run it). Accepted spreads don't fail it but are
-   surfaced as non-blocking `notices` — a release on an accepted band says so.  
+   surfaced as non-blocking `notices` — a release on an accepted band says so.
+   Active assumptions are notices too: they permit progress but never become
+   clean results by silence.
 11. Two evidence axes: repetition (same probe, more runs) proves precision;
    **corroboration** (different probes agreeing `--within` tolerance) proves
    truth. `high` needs ≥2 agreeing methods; methods in disagreement collapse
@@ -80,6 +87,15 @@ Instruments: **terra-probe**. Program tasks: **terra-route**.
    corroboration, ask **what could make these two disagree?** If the honest
    answer is "nothing, they run the same code," you have one method twice.  
 12. Prefer `terra map status` over chat memory.
+13. Calculations are inside the map. Every **external** input is a declared
+   `known:` or `assumption:` binding; unknowns are rejected. Numeric/boolean
+   literals are allowed as mathematical logic and stamped as an audit inventory
+   (assume competence; do not mistake `1/2*m*v**2` for hidden data). Known-only
+   results are clean. Assumptions propagate conditionality and their ids.
+   Changed inputs or source make the result stale until rerun.
+14. A probe may consume knowns/assumptions only as declared instrument inputs.
+   Runs stamp those values. Moved inputs stale the evidence; assumptions make
+   the run, known, and all downstream compositions conditional.
 
 ## Survey loop
 
@@ -100,12 +116,44 @@ terra unknown create <slug> --type formula \
   --expression "mean(h) <= 10 and n(h) >= 3" --var h=<quantity> \
   --claim "…?" --evidence "…"
 
+# bind a live requirement belief instead of duplicating a literal
+terra unknown create closes_mtow --type formula \
+  --expression "measured <= limit" \
+  --var measured=mtow --var limit=known:spec_mtow \
+  --claim "MTOW closes against the current requirement" --evidence "…"
+
 terra unknown create <slug> --type relation --quantity <y> \
   --x-quantity <x> --claim "F(x)?" --evidence "…" [--within 10%]
 # probes emit {"quantity","x","value"} pairs; one sweep run = many points
 
 terra unknown create <slug> --claim "…" --evidence "…"   # untyped OK
 ```
+
+If there is a defensible working value, model the different state explicitly:
+
+```bash
+terra assumption create <slug> --type number --quantity <q> --value 0.85 \
+  --claim "…?" --reason "why this basis is acceptable for now" \
+  --evidence "what replaces it with a known"
+terra assumption get <slug>  # always conditional=true + assumptions=[<slug>]
+terra assumption set <slug> --value 0.78 --reason "why the basis changed"
+```
+
+Evidence links do not overwrite the provisional value. Graduate only after a
+live run exists; the resulting known is calculated from evidence, not the
+assumed value:
+
+```bash
+terra assumption link-probe <slug> <probe_id>
+terra assumption link-run <slug> <run_id>
+terra assumption graduate <slug> [--as <known_slug>]
+```
+
+Formula `known:<id>` bindings read through the map parent chain and create
+dependency edges; moving the bound known makes the formula stale until it is
+honestly re-derived. Formula evidence runs also resolve child-first through
+parent maps, so session formulas can evaluate already-global evidence without
+copying its run.
 
 ### 2. Instrument → **terra-probe**, then
 
@@ -171,7 +219,45 @@ from terra.readings import known    # in probes/tools — never hardcode a copy
 mtow = known("mtow")["value"]
 ```
 
-### 4c. Graduate into the design (stable baseline)
+### 4c. Compose map values with a calculation
+
+```bash
+terra calculation create area \
+  --input width=known:width --input height=assumption:working_height \
+  --type number --quantity area --unit m2 --decimals 2
+# edit calc.py: calculate(inputs) -> {"value": ...}
+terra calculation validate area
+terra calculation run area
+terra calculation get area       # refuses stale; carries conditional+assumptions
+```
+
+Formula coefficients and exponents may live in `calc.py`; validation inventories
+them. Values obtained from the project or world still belong in a known or
+assumption and must be bound explicitly.
+`--decimals N` is presentation-only: raw `value` stays full precision and
+`display` carries the rounded numeric/string rendering. Quantization that
+changes the engineering value belongs explicitly in calculation logic.
+
+Rigorous multi-output work stays under the same head with `--profile model`:
+
+```bash
+terra calculation create trajectory --profile model \
+  --input mass=known:mass --input velocity=assumption:velocity \
+  --output energy=number:kinetic_energy:J \
+  --output moving=boolean:is_moving
+# calculate(inputs, ctx) -> {outputs, health: {ok: bool}, diagnostics, artifacts}
+terra calculation validate trajectory
+terra calculation run trajectory
+```
+
+Model packages may import installed/package-local modules. Terra stamps output
+bundles, diagnostics, artifact hashes, Python/platform, requirements and
+installed versions. The model must explicitly decide domain validity through
+`health.ok`; false health is recorded but blocks composition and gate. Changed
+helpers/requirements/inputs, runtime versions/platform, or artifact bytes stale
+the result, and missing artifacts do too. Numeric outputs must be finite.
+
+### 4d. Graduate into the design (stable baseline)
 
 ```bash
 terra design add <known> [--as <param>]   # global map, ≥med, backed, agreeing, fresh
@@ -227,7 +313,8 @@ probes → runs → knowns/unknowns (number | boolean | formula)
 ```bash
 terra unknown create | link-probe | link-run | graduate [--with|--into] | show | status | unlink-run | delete
 terra known get | set (metadata: --claim/--notes/--unit; never values) | depend | graph | tree | tolerance | accept-spread | reaffirm | supersede (retire wrong belief) | link-run | promote | show | unlink-run | delete
-terra cohort create | add | list | check | link-run   # coupled sets, fan-out refresh
+terra cohort create | add | set | delete | list | check | link-run   # coupled sets, fan-out refresh
+terra calculation create | validate | run | get | show | list | delete
 terra design add | attach | check | refresh | get | remove | detach
 terra gate       # mechanical debt check (all maps + design)
 terra plan create | link-run --leg | promote | show
@@ -253,6 +340,8 @@ terra unknown graduate we --cohort sizing_set        # join at birth
 terra unknown graduate s_wing --cohort sizing_set    # (created on first)
 # or later: terra cohort create sizing_set --members we,s_wing
 terra cohort list / check sizing_set                 # computed, never stored
+terra cohort set sizing_set --members we,s_wing,p_req --title "Sizing outputs"
+terra cohort delete sizing_set                       # knowns/evidence survive
 ```
 
 Laws:
@@ -266,3 +355,5 @@ Laws:
 - Per-known `link-run` on a member prints a NOTE for a reason: stop and
   use the cohort fan-out.
 - A known has ONE coupling context (one cohort max).
+- `cohort set --members` replaces the complete member list; `cohort delete`
+  removes only the coupling declaration and preserves member knowns/evidence.

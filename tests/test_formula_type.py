@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 from pathlib import Path
+import time
 
 import pytest
 
 from terra.formula_type import evaluate_expression, parse_vars_arg
 from terra.knowns import create_known, link_run_known, load_known, promote_known
+from terra.paths import create_session_map, scoped_map
 from terra.probe_init import init_probe
 from terra.probe_run import run_probe
+from terra.unknowns import create_unknown, link_run
+from terra.knowns import graduate_unknown
 
 
 def _write_measure_probe(root: Path, probe_id: str, *, quantity: str, value) -> None:
@@ -53,6 +57,9 @@ def test_parse_vars():
     v = parse_vars_arg(["h=hostile_count", "b=rcon_up:boolean"])
     assert v["h"]["quantity"] == "hostile_count"
     assert v["b"]["kind"] == "boolean"
+    assert parse_vars_arg("limit=known:spec_limit")["limit"] == {
+        "known_id": "spec_limit"
+    }
 
 
 def test_known_formula_holds_and_promote(tmp_path: Path, monkeypatch):
@@ -101,3 +108,61 @@ def test_known_formula_fails_blocks_promote(tmp_path: Path, monkeypatch):
     assert rec["stats"]["holds"] is False
     with pytest.raises(ValueError, match="confidence|hold"):
         promote_known(tmp_path, "sparse", "med")
+
+
+def test_formula_binds_live_known_and_tracks_dependency(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    init_probe(tmp_path, "measured", purpose="measured")
+    init_probe(tmp_path, "spec", purpose="spec")
+    _write_measure_probe(tmp_path, "measured", quantity="mtow", value=90)
+    measured_run = run_probe(tmp_path, "measured", to={"kind": "design"})["id"]
+    _write_measure_probe(tmp_path, "spec", quantity="mtow_limit", value=100)
+    spec_run = run_probe(tmp_path, "spec", to={"kind": "requirement"})["id"]
+    create_known(
+        tmp_path, "spec_mtow", claim="MTOW limit", quantity="mtow_limit",
+        run_id=spec_run,
+    )
+    create_known(
+        tmp_path,
+        "closes_mtow",
+        claim="MTOW closes",
+        map_type="formula",
+        expression="measured <= limit",
+        vars=["measured=mtow", "limit=known:spec_mtow"],
+        run_id=measured_run,
+    )
+    rec = load_known(tmp_path, "closes_mtow")
+    assert rec["stats"]["holds"] is True
+    assert rec["stats"]["bindings"]["limit"] == 100.0
+    assert rec["deps"]["knowns"][0]["id"] == "spec_mtow"
+
+    time.sleep(1.1)  # dependency stamps use second-resolution timestamps
+    _write_measure_probe(tmp_path, "spec", quantity="mtow_limit", value=80)
+    newer_spec = run_probe(tmp_path, "spec", to={"kind": "requirement-v2"})["id"]
+    link_run_known(tmp_path, "spec_mtow", newer_spec)
+    from terra.staleness import compute_staleness
+
+    stale = compute_staleness(tmp_path)["closes_mtow"]
+    assert stale["stale"] is True
+    assert any("spec_mtow" in reason for reason in stale["reasons"])
+
+
+def test_session_formula_can_use_parent_run(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    init_probe(tmp_path, "p", purpose="p")
+    _write_measure_probe(tmp_path, "p", quantity="ceiling", value=16500)
+    global_run = run_probe(tmp_path, "p", to={"kind": "baseline"})["id"]
+    create_session_map(tmp_path, "trial", parent="global")
+    with scoped_map("trial"):
+        create_unknown(
+            tmp_path,
+            "closes_ceiling",
+            claim="Ceiling closes",
+            map_type="formula",
+            expression="measured >= 15500",
+            vars=["measured=ceiling"],
+        )
+        link_run(tmp_path, "closes_ceiling", global_run)
+        rec = graduate_unknown(tmp_path, "closes_ceiling")
+        assert rec["stats"]["holds"] is True
+        assert rec["run_ids"] == [global_run]

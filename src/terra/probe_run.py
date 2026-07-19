@@ -218,6 +218,18 @@ def run_probe(
 
     target = to if to is not None else {"kind": "default", "probe": probe_id}
     ctx: dict[str, Any] = {"to": target}
+    from .map_inputs import resolve_map_bindings, validate_map_bindings
+
+    input_bindings = meta.get("inputs") or {}
+    binding_blocks = validate_map_bindings(input_bindings)
+    if binding_blocks:
+        raise ValueError("invalid probe input bindings: " + "; ".join(binding_blocks))
+    input_values, input_snapshots, input_assumptions = resolve_map_bindings(
+        project_root,
+        input_bindings,
+        consumer=f"probe:{probe_id}",
+    )
+    ctx["inputs"] = input_values
     if dry_run:
         ctx["dry_run"] = True
     # Watch: probe owns the window; substrate only injects deadline/duration
@@ -300,6 +312,11 @@ def run_probe(
         "watch_mode": ctx.get("watch_mode"),
         "duration_s": ctx.get("duration_s"),
         "map_id": get_active_map_id(project_root),
+        "input_bindings": input_bindings,
+        "inputs": input_snapshots,
+        "conditional": bool(input_assumptions),
+        "assumptions": input_assumptions,
+        "probe_source_sha256": hashlib.sha256(script_path.read_bytes()).hexdigest(),
     }
     # Iterative solvers: probe runs the loop internally and reports the
     # settled value. The solve is the sample — iterates never stamp runs.

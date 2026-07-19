@@ -60,6 +60,9 @@ def create_unknown(
     tolerance: Any = None,
     x_quantity: str | None = None,
     x_unit: str = "",
+    role: str = "unknown",
+    assumed_value: Any = None,
+    assumption_reason: str = "",
 ) -> Path:
     if not _SLUG_RE.match(unknown_id):
         raise ValueError(
@@ -99,12 +102,29 @@ def create_unknown(
         vars_spec = {}
         expr = ""
 
+    if role not in ("unknown", "assumption"):
+        raise ValueError("role must be unknown or assumption")
+    if role == "assumption":
+        if map_type not in ("number", "boolean"):
+            raise ValueError("assumptions currently support type=number|boolean")
+        if not str(assumption_reason or "").strip():
+            raise ValueError("assumption requires a reason")
+        if map_type == "number" and (
+            not isinstance(assumed_value, (int, float))
+            or isinstance(assumed_value, bool)
+        ):
+            raise ValueError("number assumption value must be numeric")
+        if map_type == "boolean" and not isinstance(assumed_value, bool):
+            raise ValueError("boolean assumption value must be true or false")
+        blocks_build = False
+
     now = _now()
     # create with --probe behaves like link-probe (probing, not open)
     status = "probing" if probe_id else "open"
     record: dict[str, Any] = {
         "schema_version": UNKNOWN_SCHEMA_VERSION,
         "id": unknown_id,
+        "role": role,
         "claim": claim.strip(),
         "status": status,
         "blocks_build": bool(blocks_build),
@@ -119,6 +139,12 @@ def create_unknown(
         "created_at": now,
         "updated_at": now,
     }
+    if role == "assumption":
+        record["assumed_value"] = assumed_value
+        record["assumption_reason"] = assumption_reason.strip()
+        record["assumption_revisions"] = [
+            {"at": now, "value": assumed_value, "reason": assumption_reason.strip()}
+        ]
     if map_type in SCALAR_TYPES:
         record["type"] = map_type
         record["quantity"] = quantity.strip()
@@ -234,7 +260,14 @@ def link_run(
     if not isinstance(run_id, str) or not run_id.strip():
         raise ValueError("run_id must be a non-empty string")
     run_id = run_id.strip()
+    rec = load_unknown(project_root, unknown_id)
     meta_path = _run_meta_path(project_root, run_id)
+    if not meta_path.is_file() and rec.get("type") == "formula":
+        from .paths import find_run_dir
+
+        visible = find_run_dir(project_root, run_id)
+        if visible is not None:
+            meta_path = visible[0] / RUN_META_NAME
     if not meta_path.is_file():
         raise FileNotFoundError(
             f"run not found: {run_id} (expected {meta_path})"
@@ -259,7 +292,6 @@ def link_run(
     except (json.JSONDecodeError, OSError):
         pass
 
-    rec = load_unknown(project_root, unknown_id)
     rids = list(rec.get("run_ids") or [])
     if run_id not in rids:
         rids.append(run_id)
@@ -377,6 +409,15 @@ def list_unknowns(project_root: Path) -> list[dict[str, Any]]:
     return out
 
 
+def list_role(project_root: Path, role: str) -> list[dict[str, Any]]:
+    """List unresolved records by epistemic role (legacy records are unknowns)."""
+    return [
+        row
+        for row in list_unknowns(project_root)
+        if (row.get("record") or {}).get("role", "unknown") == role
+    ]
+
+
 def validate_unknown_file(path: Path) -> dict[str, Any]:
     path = path.resolve()
     if not path.is_file():
@@ -420,15 +461,22 @@ def validate_all_unknowns(project_root: Path) -> dict[str, Any]:
         if r.get("record")
         and r["record"].get("status") in ACTIVE_STATUSES
     ]
-    blocking = [
+    unknown_active = [
         r
         for r in active
-        if r.get("record") and r["record"].get("blocks_build") is True
+        if r.get("record")
+        and r["record"].get("role", "unknown") == "unknown"
+    ]
+    assumptions = [
+        r
+        for r in active
+        if r.get("record") and r["record"].get("role") == "assumption"
     ]
     return {
         "ok": not any_fail,
         "blocks": store_blocks,
         "unknowns": rows,
         "active_count": len(active),
-        "blocking_count": len(blocking),
+        "blocking_count": len(unknown_active),
+        "assumption_count": len(assumptions),
     }

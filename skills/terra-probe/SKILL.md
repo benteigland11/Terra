@@ -44,17 +44,20 @@ If using **`terra route`**: instrument work is a route task (`--skill terra-prob
 
 Do **not** freehand domain behavior in product code while “just fixing the probe” — the probe is how you ask the world.
 
-### Engineering packages (not only Minecraft fog)
+### Engineering instruments (not only Minecraft fog)
 
-Closed-form models (stall, radiator area, mass stations, ROM cost) **still need probes**.  
-Pattern: enabler tool under `tools/` **and** a map probe that shells/imports it, emits **measures**, gets **`terra probe run`**, then **terra-survey** link-run / known / formula.
+An engineering tool needs a probe only when it interrogates an outside
+authority: hardware, files, CAD/solver installations, services, or an
+independently authoritative simulation. Deterministic manipulation of map
+knowns/assumptions is a **calculation** (`terra-survey`), not a probe. Do not
+wrap closed-form arithmetic in a fake instrument merely to stamp a run.
 
 | Claim family | Typical probe | Measures (examples) |
 | ------------ | ------------- | ------------------- |
 | Aero / mission | `analyze_config` / `mission_perf` | `stall_kt`, `range_km`, `L_D` |
 | Mass / CG | `mass_props` | `cg_pct_mac`, `mtow_kg` |
 | Power / thermal | `power_thermal` | `power_margin`, `radiator_area_m2` |
-| Cost | `cost_model` | `unit_cost_usd`, `cost_per_pflop` |
+| External cost source | `cost_source` | `unit_cost_usd`, `cost_per_pflop` |
 | Fit / envelope | `payload_fit` | `fits_fairing`, `mass_margin_frac` |
 | Regen contract | `print_regen` / `cad_build` | boolean ok + artifact paths |
 
@@ -72,6 +75,9 @@ Pattern: enabler tool under `tools/` **and** a map probe that shells/imports it,
 6. Probes stay **global**; which **map** records the run is active / `--map` (**terra-scopes**).  
 7. Bare `python tools/foo.py` is **not** a map reading — use **`terra probe run`**.  
 8. Hand off **`run_id`** (from `--json`) to **terra-survey**; never “it printed OK.”
+9. Map values used by a probe are declared `known:` / `assumption:` inputs and
+   read from `ctx["inputs"]`. The runner stamps them; moved inputs stale the
+   evidence. Never hide a copied domain value in `probe.py`.
 
 ---
 
@@ -82,6 +88,10 @@ Pattern: enabler tool under `tools/` **and** a map probe that shells/imports it,
 
 ```bash
 terra probe create <slug> --purpose "…" --kind watch   # duration 0 = snapshot
+# when the instrument needs map configuration:
+terra probe create <slug> --purpose "…" \
+  --input scale=known:sensor_scale \
+  --input ambient=assumption:ambient_temperature
 # --kind run to drive/simulate
 # --duration N for watch window (seconds)
 ```
@@ -103,6 +113,7 @@ REQUIRED_EXPORTS = ["to", "status", "artifacts"]
 def run(ctx=None):
     ctx = ctx or {}
     to = ctx.get("to") or {"kind": "default"}
+    inputs = ctx.get("inputs") or {}  # declared probe.json inputs only
     if ctx.get("dry_run") or ctx.get("_terra_validation") == "level1":
         return {"to": to, "status": "ok", "artifacts": []}
     # live work for THIS install only
@@ -172,6 +183,7 @@ Each leaf run still links on the map (**terra-survey**). Suite is recipe/ops, no
 
 ```bash
 terra probe create <id> --purpose "…" --kind watch|run [--duration N]
+  [--input NAME=known:ID|assumption:ID ...]
 terra probe validate <id>
 terra probe run <id> --to '{…}' [--strict-to] [--strict-status]
 terra probe list

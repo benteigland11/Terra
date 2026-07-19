@@ -383,6 +383,9 @@ def validate_probe_dir(probe_path: Path) -> dict[str, Any]:
 
     kind_blocks, kind_info = validate_kind_meta(meta)
     blocks.extend(kind_blocks)
+    from .map_inputs import validate_map_bindings
+
+    blocks.extend(validate_map_bindings(meta.get("inputs")))
 
     entry = meta.get("entry", PROBE_ENTRY_DEFAULT)
     parsed = _parse_entry(entry) if isinstance(entry, str) else None

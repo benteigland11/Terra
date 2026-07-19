@@ -78,11 +78,14 @@ def collect_map_status(
     probes = _probe_rows(project_root)
 
     with _scoped_map(mid):
+        from .calculations import list_calculations
+
         unknowns = list_unknowns(project_root)
         knowns = list_knowns(project_root)
         plans = list_plans(project_root)
         runs = list_runs(project_root)
         suites = list_suites(project_root)
+        calculations = list_calculations(project_root)
         belief = str(map_root(project_root))
         from .cohorts import cohort_violations, list_cohorts
         from .staleness import compute_staleness
@@ -92,13 +95,21 @@ def collect_map_status(
         cohort_viols = cohort_violations(project_root)
 
     open_unk = []
+    assumptions = []
     blocking = []
+    unknown_rows = [
+        u
+        for u in unknowns
+        if (u.get("record") or {}).get("role", "unknown") == "unknown"
+    ]
     for u in unknowns:
         rec = u.get("record") or {}
         st = rec.get("status")
         if st in ("open", "probing", "blocked"):
-            open_unk.append(u)
-            if rec.get("blocks_build"):
+            if rec.get("role", "unknown") == "assumption":
+                assumptions.append(u)
+            else:
+                open_unk.append(u)
                 blocking.append(u)
 
     voided_runs = [
@@ -119,8 +130,14 @@ def collect_map_status(
             plan_open.append(p)
 
     known_by_conf: dict[str, list] = {"low": [], "med": [], "high": []}
+    from .run_inputs import record_input_state
+
+    known_input_states: dict[str, dict[str, Any]] = {}
     for k in knowns:
         rec = k.get("record") or {}
+        known_input_states[str(rec.get("id") or k.get("id"))] = record_input_state(
+            project_root, rec
+        )
         conf = rec.get("confidence") or "low"
         if conf not in known_by_conf:
             conf = "low"
@@ -133,14 +150,30 @@ def collect_map_status(
         "probes_path": str(probes_root(project_root)),
         "counts": {
             "probes": len(probes),
-            "unknowns": len(unknowns),
+            "unknowns": len(unknown_rows),
             "unknowns_open": len(open_unk),
             "unknowns_blocking": len(blocking),
+            "assumptions": len(assumptions),
+            "calculations": len(calculations),
+            "calculations_stale": sum(
+                1 for c in calculations if c["staleness"]["stale"]
+            ),
+            "calculations_conditional": sum(
+                1
+                for c in calculations
+                if ((c.get("record") or {}).get("latest") or {}).get("conditional")
+            ),
             "knowns": len(knowns),
             "knowns_low": len(known_by_conf["low"]),
             "knowns_med": len(known_by_conf["med"]),
             "knowns_high": len(known_by_conf["high"]),
             "knowns_stale": sum(1 for v in stale_map.values() if v.get("stale")),
+            "knowns_input_stale": sum(
+                1 for v in known_input_states.values() if v.get("stale")
+            ),
+            "knowns_conditional": sum(
+                1 for v in known_input_states.values() if v.get("conditional")
+            ),
             "plans": len(plans),
             "plans_open": len(plan_open),
             "plans_done": len(plan_done),
@@ -162,6 +195,43 @@ def collect_map_status(
                 "ok": u.get("ok"),
             }
             for u in open_unk
+        ],
+        "assumptions": [
+            {
+                "id": (u.get("record") or {}).get("id") or u.get("id"),
+                "status": (u.get("record") or {}).get("status"),
+                "type": (u.get("record") or {}).get("type"),
+                "value": (u.get("record") or {}).get("assumed_value"),
+                "unit": (u.get("record") or {}).get("unit") or "",
+                "reason": (u.get("record") or {}).get("assumption_reason"),
+                "claim": ((u.get("record") or {}).get("claim") or "")[:80],
+                "evidence_n": (((u.get("record") or {}).get("stats") or {}).get("n") or 0),
+                "ok": u.get("ok"),
+            }
+            for u in assumptions
+        ],
+        "calculations": [
+            {
+                "id": c.get("id"),
+                "ok": c.get("ok"),
+                "blocks": c.get("blocks") or [],
+                "stale": c["staleness"]["stale"],
+                "stale_reasons": c["staleness"]["reasons"],
+                "value": ((c.get("record") or {}).get("latest") or {}).get("value"),
+                "quantity": ((c.get("record") or {}).get("output") or {}).get("quantity"),
+                "profile": (c.get("record") or {}).get("profile") or "expression",
+                "outputs": list(
+                    (((c.get("record") or {}).get("latest") or {}).get("outputs") or {}).keys()
+                ),
+                "conditional": bool(
+                    ((c.get("record") or {}).get("latest") or {}).get("conditional")
+                ),
+                "assumptions": (
+                    ((c.get("record") or {}).get("latest") or {}).get("assumptions")
+                    or []
+                ),
+            }
+            for c in calculations
         ],
         "knowns": [
             {
@@ -199,6 +269,19 @@ def collect_map_status(
                         str((k.get("record") or {}).get("id") or k.get("id"))
                     ) or {}).get("reasons") or []
                 ),
+                "evidence_input_stale": bool(
+                    known_input_states.get(
+                        str((k.get("record") or {}).get("id") or k.get("id")), {}
+                    ).get("stale")
+                ),
+                "conditional": bool(
+                    known_input_states.get(
+                        str((k.get("record") or {}).get("id") or k.get("id")), {}
+                    ).get("conditional")
+                ),
+                "assumptions": known_input_states.get(
+                    str((k.get("record") or {}).get("id") or k.get("id")), {}
+                ).get("assumptions", []),
                 "claim": ((k.get("record") or {}).get("claim") or "")[:80],
                 "ok": k.get("ok"),
             }
@@ -342,7 +425,7 @@ def _derive_agent_guidance(
         map_flag = ["--map", mid] if mid != active else []
 
         for u in scope.get("unknowns_open") or []:
-            sev = "block" if u.get("blocks_build") else "high"
+            sev = "block"
             uid = str(u.get("id") or "")
             attention.append(
                 attention_item(
@@ -362,7 +445,73 @@ def _derive_agent_guidance(
                     "unknown.show",
                     ["terra", *map_flag, "unknown", "show", uid, "--json"],
                     why="inspect open unknown before freehand domain work",
-                    priority=10 if u.get("blocks_build") else 20,
+                    priority=10,
+                    map_id=mid,
+                )
+            )
+
+        for assumption in scope.get("assumptions") or []:
+            aid = str(assumption.get("id") or "")
+            attention.append(
+                attention_item(
+                    "assumption_active",
+                    id=aid,
+                    severity="med",
+                    why=(
+                        f"conditional input on map {mid}: {aid}="
+                        f"{assumption.get('value')!r}"
+                    ),
+                    extra={"map_id": mid, "evidence_n": assumption.get("evidence_n")},
+                )
+            )
+
+        for calculation in scope.get("calculations") or []:
+            cid = str(calculation.get("id") or "")
+            if not calculation.get("ok") or calculation.get("stale"):
+                why = "; ".join(
+                    calculation.get("blocks")
+                    or calculation.get("stale_reasons")
+                    or ["calculation needs attention"]
+                )
+                attention.append(
+                    attention_item(
+                        "calculation_invalid"
+                        if not calculation.get("ok")
+                        else "calculation_stale",
+                        id=cid,
+                        severity="block",
+                        why=f"calculation {cid} on {mid}: {why}",
+                        extra={"map_id": mid},
+                    )
+                )
+                next_actions.append(
+                    action(
+                        "calculation.show",
+                        ["terra", *map_flag, "calculation", "show", cid],
+                        why="inspect and rerun the derived value",
+                        priority=12,
+                        map_id=mid,
+                    )
+                )
+            elif calculation.get("conditional"):
+                attention.append(
+                    attention_item(
+                        "calculation_conditional",
+                        id=cid,
+                        severity="med",
+                        why=(
+                            f"calculation {cid} on {mid} depends on assumptions: "
+                            + ", ".join(calculation.get("assumptions") or [])
+                        ),
+                        extra={"map_id": mid},
+                    )
+                )
+            next_actions.append(
+                action(
+                    "assumption.show",
+                    ["terra", *map_flag, "assumption", "show", aid, "--json"],
+                    why="inspect provisional basis and evidence needed",
+                    priority=30,
                     map_id=mid,
                 )
             )
@@ -400,6 +549,7 @@ def _derive_agent_guidance(
                 )
 
         for k in scope.get("knowns") or []:
+            kid = str(k.get("id") or "")
             if str(k.get("status") or "") in RETIRED_STATUSES:
                 kid = str(k.get("id") or "")
                 attention.append(
@@ -417,6 +567,41 @@ def _derive_agent_guidance(
                 )
                 # Deliberately retired: don't also alarm as unbacked/stale/etc.
                 continue
+            if k.get("evidence_input_stale"):
+                attention.append(
+                    attention_item(
+                        "evidence_input_stale",
+                        id=kid,
+                        severity="block",
+                        why=(
+                            f"known {kid} on map {mid} uses probe evidence "
+                            "whose declared inputs moved"
+                        ),
+                        extra={"map_id": mid},
+                    )
+                )
+                next_actions.append(
+                    action(
+                        "probe.rerun",
+                        ["terra", *map_flag, "known", "show", kid],
+                        why="identify and rerun stale assumption/known-conditioned evidence",
+                        priority=9,
+                        map_id=mid,
+                    )
+                )
+            elif k.get("conditional"):
+                attention.append(
+                    attention_item(
+                        "known_conditional",
+                        id=kid,
+                        severity="med",
+                        why=(
+                            f"known {kid} on map {mid} rests on assumptions: "
+                            + ", ".join(k.get("assumptions") or [])
+                        ),
+                        extra={"map_id": mid},
+                    )
+                )
             if k.get("methods_agree") is False:
                 kid = str(k.get("id") or "")
                 if k.get("spread_accepted"):
@@ -661,6 +846,9 @@ def format_status_text(board: dict[str, Any]) -> str:
             f"  probes={c.get('probes')} (global)  "
             f"unknowns={c.get('unknowns')} "
             f"(open={c.get('unknowns_open')} block={c.get('unknowns_blocking')})  "
+            f"assumptions={c.get('assumptions')}  "
+            f"calculations={c.get('calculations')} "
+            f"(stale={c.get('calculations_stale')})  "
             f"knowns={c.get('knowns')} "
             f"(L{c.get('knowns_low')}/M{c.get('knowns_med')}/H{c.get('knowns_high')})  "
             f"plans={c.get('plans')} "
@@ -668,6 +856,33 @@ def format_status_text(board: dict[str, Any]) -> str:
             f"runs={c.get('runs')} voided={c.get('runs_voided')}  "
             f"suites={c.get('suites')}"
         )
+        lines.append("")
+
+        assumptions = scope.get("assumptions") or []
+        lines.append(f"  ASSUMPTIONS ({len(assumptions)})")
+        if not assumptions:
+            lines.append("    (none)")
+        else:
+            for assumption in assumptions:
+                lines.append(
+                    f"    • {assumption.get('id')}={assumption.get('value')!r} "
+                    f"CONDITIONAL n={assumption.get('evidence_n')}  "
+                    f"{assumption.get('claim') or ''}"
+                )
+        lines.append("")
+
+        calculations = scope.get("calculations") or []
+        lines.append(f"  CALCULATIONS ({len(calculations)})")
+        if not calculations:
+            lines.append("    (none)")
+        else:
+            for calculation in calculations:
+                state = "STALE" if calculation.get("stale") else "current"
+                conditional = " CONDITIONAL" if calculation.get("conditional") else ""
+                lines.append(
+                    f"    • {calculation.get('id')}={calculation.get('value')!r} "
+                    f"{state}{conditional}"
+                )
         lines.append("")
 
         # Open unknowns first — attention surface

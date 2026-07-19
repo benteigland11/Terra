@@ -1,6 +1,9 @@
 # Map unknowns
 
-Named gaps. Soft "we're stuck" becomes a ticket.
+Named gaps. If an active unknown exists, the result is not composable and the
+gate fails. The legacy `blocks_build: false` escape hatch no longer softens an
+unknown; a usable provisional value must be modeled as an
+[assumption](assumptions.md).
 
 ## Record (`.terra/map/unknowns/<id>.json`)
 

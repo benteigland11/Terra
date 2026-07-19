@@ -32,7 +32,7 @@ LIB_DIRNAME = "lib"
 SUITES_DIRNAME = "suites"
 KNOWNS_DIRNAME = "knowns"
 PLANS_DIRNAME = "plans"
-DATA_DIRNAME = "data"
+CALCULATIONS_DIRNAME = "calculations"
 ACTIVE_MAP_FILENAME = "active_map"
 MAP_META_NAME = "map.json"
 GLOBAL_MAP_ID = "global"
@@ -208,6 +208,15 @@ def run_dir(project_root: Path, run_id: str) -> Path:
     return runs_root(project_root) / run_id
 
 
+def find_run_dir(project_root: Path, run_id: str) -> tuple[Path, str] | None:
+    """Find a visible run child-first through the active map's parent chain."""
+    for mid in map_chain(project_root):
+        path = map_root(project_root, mid) / RUNS_DIRNAME / run_id
+        if path.is_dir():
+            return path, mid
+    return None
+
+
 def suites_root(project_root: Path) -> Path:
     return map_root(project_root) / SUITES_DIRNAME
 
@@ -223,6 +232,20 @@ def plans_root(project_root: Path) -> Path:
 
 def plan_path(project_root: Path, plan_id: str) -> Path:
     return plans_root(project_root) / f"{plan_id}.json"
+
+
+def calculations_root(project_root: Path) -> Path:
+    return map_root(project_root) / CALCULATIONS_DIRNAME
+
+
+def calculation_dir(project_root: Path, calculation_id: str) -> Path:
+    return calculations_root(project_root) / calculation_id
+
+
+def ensure_calculations_store(project_root: Path) -> Path:
+    root = calculations_root(project_root)
+    root.mkdir(parents=True, exist_ok=True)
+    return root
 
 
 def ensure_probes_store(project_root: Path) -> Path:
@@ -331,6 +354,7 @@ def ensure_belief_store(project_root: Path) -> Path:
     ensure_runs_store(project_root)
     ensure_suites_store(project_root)
     ensure_plans_store(project_root)
+    ensure_calculations_store(project_root)
     return map_root(project_root)
 
 
@@ -556,16 +580,3 @@ def ensure_project_root(start: Path | None = None) -> tuple[Path, bool]:
 
 
 # --- legacy data paths ---
-
-def data_root(project_root: Path) -> Path:
-    return map_root(project_root) / DATA_DIRNAME
-
-
-def capture_dir(project_root: Path, capture_id: str) -> Path:
-    return data_root(project_root) / capture_id
-
-
-def ensure_data_store(project_root: Path) -> Path:
-    root = data_root(project_root)
-    root.mkdir(parents=True, exist_ok=True)
-    return root

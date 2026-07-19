@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 UNKNOWN_SCHEMA_VERSION = 1
+UNKNOWN_ROLES = frozenset({"unknown", "assumption"})
 
 UNKNOWN_STATUSES = frozenset(
     {
@@ -36,6 +37,32 @@ def validate_unknown_record(data: Any, *, expected_id: str | None = None) -> lis
             f"schema_version must be {UNKNOWN_SCHEMA_VERSION}, "
             f"got {data.get('schema_version')!r}"
         )
+
+    role = data.get("role", "unknown")
+    if role not in UNKNOWN_ROLES:
+        blocks.append(f"role must be one of {sorted(UNKNOWN_ROLES)}, got {role!r}")
+    if role == "assumption":
+        if data.get("type") not in ("number", "boolean"):
+            blocks.append("assumption type must be number or boolean")
+        if "assumed_value" not in data:
+            blocks.append("assumption requires assumed_value")
+        elif data.get("type") == "number" and (
+            not isinstance(data.get("assumed_value"), (int, float))
+            or isinstance(data.get("assumed_value"), bool)
+        ):
+            blocks.append("number assumption assumed_value must be numeric")
+        elif data.get("type") == "boolean" and not isinstance(
+            data.get("assumed_value"), bool
+        ):
+            blocks.append("boolean assumption assumed_value must be true or false")
+        reason = data.get("assumption_reason")
+        if not isinstance(reason, str) or not reason.strip():
+            blocks.append("assumption requires assumption_reason")
+        if data.get("blocks_build") is not False:
+            blocks.append("assumption blocks_build must be false")
+        revisions = data.get("assumption_revisions")
+        if revisions is not None and not isinstance(revisions, list):
+            blocks.append("assumption_revisions must be a list")
 
     uid = data.get("id")
     if not isinstance(uid, str) or not uid.strip():

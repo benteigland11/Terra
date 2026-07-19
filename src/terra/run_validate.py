@@ -83,6 +83,18 @@ def validate_run_record(
                     f"artifacts[{i}] must be str or dict, got {type(item).__name__}"
                 )
 
+    bindings = data.get("input_bindings")
+    if bindings is not None:
+        from .map_inputs import validate_map_bindings
+
+        blocks.extend(validate_map_bindings(bindings))
+        if not isinstance(data.get("inputs"), dict):
+            blocks.append("inputs must stamp resolved declared input provenance")
+        if not isinstance(data.get("assumptions"), list):
+            blocks.append("assumptions must be a list")
+        if not isinstance(data.get("conditional"), bool):
+            blocks.append("conditional must be boolean")
+
     return blocks
 
 

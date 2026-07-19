@@ -51,6 +51,12 @@ terra map status                    # must be agent envelope {status,data}
 terra map status --human            # secondary
 terra map create exp --use
 terra unknown create u --type number --quantity q --claim "c?" --evidence "e"
+terra assumption create a --type number --quantity q --value 1 \
+  --claim "working q?" --reason "DX basis" --evidence "measure q"
+terra assumption get a               # conditional=true; map status notice
+terra calculation create c --input a=assumption:a --type number --quantity q
+# edit calc.py; calculation validate/run/get; changing a must stale c
+terra gate                            # assumption passes; active unknown fails
 terra probe create p --purpose "p" --kind watch
 # implement measures; validate; run --json; link-run; unknown graduate → known
 # known get/depend/reaffirm; design add/attach/check; terra gate; void
@@ -129,6 +135,49 @@ terra --map night_trial unknown show hostiles
 ```
 
 Probes are **global**; runs land on **active** map. Wrong active map = silent wrong store.
+
+### 2a. Unknown vs assumption is a hard semantic boundary
+
+All active records with `role: unknown` gate, including legacy
+`blocks_build: false` records. Only `role: assumption` carries a consumable
+typed value. Assumption reads must remain `conditional: true`, revisions need
+a reason, evidence must not silently replace the provisional value, and
+graduation must derive the known from linked evidence.
+
+### 2aa. Calculation values have one legal doorway
+
+`calculation` bindings accept only `known:<id>` and `assumption:<id>`.
+Numeric/boolean literals are valid mathematical logic under assumed competence;
+validation returns and results stamp a literal inventory instead of blocking
+them. Results also stamp source+input hashes. A changed source or input makes
+`calculation get` refuse the stale value. Assumptions propagate into
+`conditional` plus the result's `assumptions` list; they never disappear behind
+arithmetic.
+Output `display.decimal_places` is presentation metadata: `run_calculation`
+must preserve raw `value` and add a separate `{value, formatted,
+decimal_places}` display envelope. Never round intermediates in the substrate;
+engineering quantization belongs in `calculate(inputs)`.
+
+`calculation profile=model` is the rigorous package rung: full imports,
+`calculate(inputs, ctx)`, exact declared multi-output names, JSON-safe
+diagnostics, explicit `health: {ok: bool}`, in-package artifacts with hashes,
+and runtime/requirements stamping. Package hash covers top-level `*.py` plus `requirements.txt`; evict
+package-local modules around each run so same-process reruns cannot execute
+stale bytecode. Missing requirements block validate. Never infer solver health
+from arbitrary diagnostics: model code owns the domain checks and must set
+`health.ok`; false is preserved but stales the result and gates. Re-check
+artifact existence/hash and Python/platform/installed dependency versions on
+every read/gate. Reject non-finite numeric outputs.
+
+### 2ab. Probe inputs are evidence provenance, not consumer trivia
+
+Probe `inputs` accept only `known:<id>` / `assumption:<id>`. `run_probe`
+resolves them into `ctx["inputs"]` and stamps bindings, snapshots, source hash,
+conditionality, and assumptions. `record_input_state` is dynamic: moving an
+input makes linked evidence stale, known reads refuse it, and gate/status block.
+Conditionality must propagate through a known into later probes/calculations.
+Source changes are audit provenance, not automatic invalidation of historical
+observations; repeated tests often legitimately edit an instrument between runs.
 
 ### 2b. Active map: one shared pointer + TERRA_MAP per-shell pin
 
@@ -352,7 +401,9 @@ share identical live run sets) — never store it. Mixed cohort →
 on every member (`--allow-cohort-mismatch` escape). Fan-out refresh:
 `terra cohort link-run <id> <run>`; `unknown graduate --cohort` joins at
 birth; per-member `known link-run` prints a NOTE (plus a same-start
-re-solve NOTE — identical `to` on a converge probe adds no n).
+re-solve NOTE — identical `to` on a converge probe adds no n). Cohort CRUD:
+`cohort set --members` replaces membership (and can update `--title`);
+`cohort delete` removes only the declaration, preserving knowns/evidence.
 Tests: `tests/test_cohorts.py`.
 
 ### 14d. Map tree: read-through, shadowing, adopt
@@ -382,6 +433,16 @@ corroboration at ≥2 SHARED stations (disjoint grids → agree=None).
 `evaluate_relation` = linear interp between station means, loud outside
 x_range. read_known(at=...) / `known get --at` / records need
 quantity + x_quantity. Tests: `tests/test_relation_type.py`.
+
+### 15b. Formula known bindings + parent evidence
+
+Formula vars accept run quantities (`--var measured=mtow`) or visible knowns
+(`--var limit=known:spec_mtow`). Known bindings use the canonical read path,
+become stamped known dependencies, and therefore stale the formula when the
+bound belief moves. Formula-only run lookup walks the active map parent chain
+child-first; ordinary known/unknown run links remain local. This lets session
+closure formulas consume global evidence without duplicating run directories.
+Tests: `tests/test_formula_type.py`.
 
 ### 16. Probe loader bypasses the pyc cache
 
@@ -447,7 +508,7 @@ skills/
   terra-start/      init project
   terra-brief/      design request + enablers
   terra-route/      task DAG + lead loop
-  terra-survey/     unknown/known/plan/void
+  terra-survey/     unknown/assumption/known/calculation/plan/void
   terra-scopes/     global vs session
   terra-map/        thin index / router
   terra-probe/      instruments
