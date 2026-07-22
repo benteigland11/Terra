@@ -422,6 +422,7 @@ def graduate_unknown(
     # Union live evidence across contributors (order-preserving)
     all_runs: list[str] = []
     all_probes: list[str] = []
+    calculation_input_knowns: list[str] = []
     for unk in contributors:
         for rid in _live_runs(
             project_root,
@@ -433,6 +434,25 @@ def graduate_unknown(
         for pid in unk.get("probe_ids") or []:
             if pid not in all_probes:
                 all_probes.append(pid)
+    for rid in all_runs:
+        meta_path = run_dir(project_root, rid) / RUN_META_NAME
+        if not meta_path.is_file() and mtype == "formula":
+            from .paths import find_run_dir
+
+            visible = find_run_dir(project_root, rid)
+            if visible is not None:
+                meta_path = visible[0] / RUN_META_NAME
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if meta.get("source_type") != "calculation":
+            continue
+        for binding in (meta.get("input_bindings") or {}).values():
+            if isinstance(binding, str) and binding.startswith("known:"):
+                dep_id = binding.removeprefix("known:")
+                if dep_id not in calculation_input_knowns:
+                    calculation_input_knowns.append(dep_id)
     if not all_runs:
         raise ValueError(
             f"unknown(s) {ids} have no live (non-voided) linked runs — "
@@ -512,6 +532,19 @@ def graduate_unknown(
             rec = load_known(project_root, kid)
             rec["origin_unknown_ids"] = list(ids)
             save_known(project_root, rec)
+
+    if calculation_input_knowns:
+        rec = load_known(project_root, kid)
+        deps = rec.setdefault("deps", {"knowns": [], "files": []})
+        known_deps = deps.setdefault("knowns", [])
+        existing = {str(row.get("id")) for row in known_deps if isinstance(row, dict)}
+        for dep_id in calculation_input_knowns:
+            if dep_id not in existing:
+                known_deps.append({"id": dep_id, "as_of": None})
+        from .staleness import stamp_deps
+
+        stamp_deps(project_root, rec)
+        save_known(project_root, rec)
 
     for unk in contributors:
         unk["status"] = "resolved"

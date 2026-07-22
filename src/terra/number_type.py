@@ -463,7 +463,14 @@ def recompute_typed_node(
             vals = extract_measures_from_run_dir(
                 rdir, meta, quantity=quantity, map_type=map_type
             )
-        pid = meta.get("probe_id") or "unknown_probe"
+        pid = (
+            meta.get("probe_id")
+            or (
+                f"calculation:{meta.get('calculation_id')}"
+                if meta.get("source_type") == "calculation"
+                else "unknown_probe"
+            )
+        )
         sample_runs.append(
             {"run_id": rid, "probe_id": pid, "n": len(vals), "values": vals}
         )

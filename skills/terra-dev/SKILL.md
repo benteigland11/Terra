@@ -157,6 +157,13 @@ Output `display.decimal_places` is presentation metadata: `run_calculation`
 must preserve raw `value` and add a separate `{value, formatted,
 decimal_places}` display envelope. Never round intermediates in the substrate;
 engineering quantization belongs in `calculate(inputs)`.
+Successful calculation runs stamp a shared evidence run with
+`source_type=calculation`; `unknown link-calculation` attaches it and ordinary
+graduation births a derived known. Never fabricate a probe id. Preserve source
+hash, input snapshots, conditional assumptions, and dependency edges; moved
+inputs/source must block the derived known as stale evidence.
+Model `relation` outputs use finite, strictly x-ordered `points`; stamp every
+point as a relation measure and require unknown type/quantity/x_quantity match.
 
 `calculation profile=model` is the rigorous package rung: full imports,
 `calculate(inputs, ctx)`, exact declared multi-output names, JSON-safe
@@ -244,7 +251,11 @@ Human `run 2026…_mobs_…` line is easy for humans, brittle for agents.
 ### 5. Formula needs vars + expression
 
 `--type formula` without `--var` fails hard (good).  
-Promote med/high blocked when `n` ladder fails even if `holds=true` (good).  
+Formula confidence follows the `n` ladder independently of `holds`; a failed
+formula can be high confidence, and `holds=false` blocks `terra gate`.
+The default `terra map status` row must expose `holds` + `verdict`, and failure
+must produce blocking `known_formula_failed` attention + `known.show` action.
+Promote med/high remains blocked when the `n` ladder is not met.
 Document both in user skills; keep tests in `tests/test_formula_type.py`.
 
 ### 6. Sequence plans block ahead of order

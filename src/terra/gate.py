@@ -117,6 +117,21 @@ def _collect_map_violations(
                     "why": f"known {kid} has no live evidence (n={n})",
                 }
             )
+        if rec.get("type") == "formula" and (rec.get("stats") or {}).get(
+            "holds"
+        ) is False:
+            violations.append(
+                {
+                    "kind": "known_formula_failed",
+                    "id": kid,
+                    "map_id": map_id,
+                    "why": (
+                        f"formula known {kid} does not hold "
+                        f"(claimed confidence={rec.get('confidence') or 'low'}, "
+                        f"derived={rec.get('confidence_derived') or 'low'}, n={n})"
+                    ),
+                }
+            )
         corr = ((rec.get("stats") or {}).get("corroboration")) or {}
         if corr.get("agree") is False and corr.get("accepted") is not True:
             violations.append(

@@ -8,7 +8,9 @@ import time
 import pytest
 
 from terra.formula_type import evaluate_expression, parse_vars_arg
+from terra.gate import check_gate
 from terra.knowns import create_known, link_run_known, load_known, promote_known
+from terra.map_status import collect_status_board
 from terra.paths import create_session_map, scoped_map
 from terra.probe_init import init_probe
 from terra.probe_run import run_probe
@@ -90,11 +92,16 @@ def test_known_formula_holds_and_promote(tmp_path: Path, monkeypatch):
     assert rec2["confidence"] == "med"
 
 
-def test_known_formula_fails_blocks_promote(tmp_path: Path, monkeypatch):
+def test_known_formula_failure_can_be_confident_and_blocks_gate(
+    tmp_path: Path, monkeypatch
+):
     monkeypatch.chdir(tmp_path)
     init_probe(tmp_path, "p", purpose="p")
     _write_measure_probe(tmp_path, "p", quantity="hostile_count", value=50)
-    rid = run_probe(tmp_path, "p", to={"kind": "region"}).get("id")
+    run_ids = [
+        run_probe(tmp_path, "p", to={"kind": "region", "id": str(i)}).get("id")
+        for i in range(5)
+    ]
     create_known(
         tmp_path,
         "sparse",
@@ -102,12 +109,38 @@ def test_known_formula_fails_blocks_promote(tmp_path: Path, monkeypatch):
         map_type="formula",
         expression="mean(h) <= 10",
         vars=["h=hostile_count"],
-        run_id=rid,
+        run_id=run_ids[0],
     )
+    for rid in run_ids[1:]:
+        link_run_known(tmp_path, "sparse", rid)
     rec = load_known(tmp_path, "sparse")
     assert rec["stats"]["holds"] is False
-    with pytest.raises(ValueError, match="confidence|hold"):
-        promote_known(tmp_path, "sparse", "med")
+    assert rec["confidence_derived"] == "high"
+    assert promote_known(tmp_path, "sparse", "high")["confidence"] == "high"
+
+    verdict = check_gate(tmp_path)
+    assert verdict["ok"] is False
+    assert any(
+        v["kind"] == "known_formula_failed" and v["id"] == "sparse"
+        for v in verdict["violations"]
+    )
+    failure = next(
+        v for v in verdict["violations"] if v["kind"] == "known_formula_failed"
+    )
+    assert "claimed confidence=high" in failure["why"]
+    assert "derived=high" in failure["why"]
+
+    board = collect_status_board(tmp_path)
+    row = next(k for k in board["scopes"][0]["knowns"] if k["id"] == "sparse")
+    assert row["holds"] is False
+    assert row["verdict"] == "fail"
+    attention = next(
+        a for a in board["attention"] if a["kind"] == "known_formula_failed"
+    )
+    assert attention["id"] == "sparse"
+    assert attention["verdict"] == "fail"
+    action = next(a for a in board["next_actions"] if a["op"] == "known.show")
+    assert action["argv"] == ["terra", "known", "show", "sparse", "--json"]
 
 
 def test_formula_binds_live_known_and_tracks_dependency(tmp_path: Path, monkeypatch):

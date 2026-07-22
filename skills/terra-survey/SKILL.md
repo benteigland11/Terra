@@ -28,7 +28,9 @@ Instruments: **terra-probe**. Program tasks: **terra-route**.
    hard gates. If progress genuinely requires a provisional typed value, make
    it an explicit **assumption** with a reason; never hide it in a probe.
 2. Validate alone ≠ surveyed — **run + link** is the reading.  
-3. n=1 cannot promote **high**; failed formula cannot promote as true.  
+3. n=1 cannot promote **high**. Formula confidence measures confidence in the
+   verdict, independently of pass/fail; a confident failure is valid knowledge
+   and `holds: false` blocks the gate.
 4. Outside claims need unknown → **probe run** → known. Deterministic map-to-map
    models are calculations; do not manufacture probe evidence for arithmetic.
 5. Bare `python tools/…` is not evidence — `terra probe run`.  
@@ -249,6 +251,23 @@ terra calculation create trajectory --profile model \
 terra calculation validate trajectory
 terra calculation run trajectory
 ```
+
+Every successful calculation stamps `evidence_run_id`. A matching typed
+unknown can consume it without disguising the derivation as a probe:
+
+```bash
+terra unknown link-calculation <unknown> <calculation> [--output <model_output>]
+terra unknown graduate <unknown>
+```
+
+The derived known carries calculation inputs, source hash, assumption
+conditionality, and known dependency edges. Input/source changes stale the
+evidence and block reads/gate until rerun + relink.
+
+Model calculations may declare relation output as
+`NAME=relation:Y_QUANTITY:X_QUANTITY[:Y_UNIT[:X_UNIT]]` and return
+`{"points": [{"x": ..., "value": ...}]}`. Points must be finite and strictly
+ordered by x; they feed matching relation unknowns through the same command.
 
 Model packages may import installed/package-local modules. Terra stamps output
 bundles, diagnostics, artifact hashes, Python/platform, requirements and

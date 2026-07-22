@@ -27,6 +27,16 @@ def run_input_state(project_root: Path, run_meta: dict[str, Any]) -> dict[str, A
     except (ValueError, FileNotFoundError) as exc:
         assumptions = list(run_meta.get("assumptions") or [])
         reasons.append(f"declared input unavailable: {exc}")
+    if run_meta.get("source_type") == "calculation":
+        calculation_id = str(run_meta.get("calculation_id") or "")
+        try:
+            from .calculations import calculation_source_hash
+
+            current_hash = calculation_source_hash(project_root, calculation_id)
+            if current_hash != run_meta.get("calculation_source_sha256"):
+                reasons.append("calculation source or requirements changed")
+        except (ValueError, FileNotFoundError, OSError) as exc:
+            reasons.append(f"calculation unavailable: {exc}")
     return {
         "stale": bool(reasons),
         "reasons": reasons,

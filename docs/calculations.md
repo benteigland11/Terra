@@ -25,7 +25,21 @@ def calculate(inputs):
 ```
 
 Then run `terra calculation validate area`, `terra calculation run area`, and
-`terra calculation get area`.
+`terra calculation get area`. Every successful calculation also stamps a map
+evidence run. Link the latest result to a matching typed unknown and graduate
+through the normal belief lifecycle:
+
+```bash
+terra calculation run area
+terra unknown link-calculation area area
+terra unknown graduate area
+```
+
+The resulting known is explicitly calculation-derived. Its evidence run keeps
+the calculation source hash, exact input provenance, dependency edges, and any
+assumptions. Changed inputs or calculation source make that evidence stale;
+known reads and `terra gate` refuse it until the calculation is rerun and the
+new evidence is linked.
 
 The stamped result records exact inputs, source maps, the source hash, and
 calculation time. Changed input or source makes it stale; `get` refuses it
@@ -51,8 +65,9 @@ part of the engineering logic (for example a 0.5 mm manufacturing increment),
 perform it explicitly in `calculate(inputs)`.
 
 The initial surface returns number or boolean values and does not consume other
-calculations. Compound logic can live within one calculation while every leaf
-value remains a known or assumption.
+calculations directly. Promote an intermediate result through a typed unknown
+when it deserves a durable known API; compound private logic can remain within
+one calculation while every leaf value remains a known or assumption.
 
 ## Model profile
 
@@ -64,6 +79,19 @@ terra calculation create trajectory --profile model \
   --output energy=number:kinetic_energy:J \
   --output moving=boolean:is_moving
 ```
+
+Model calculations may also emit a relation sweep:
+
+```bash
+terra calculation create polar --profile model \
+  --input slope=known:lift_curve_slope \
+  --output curve=relation:cl:alpha_deg::deg
+```
+
+The output payload is `{"points": [{"x": ..., "value": ...}, ...]}`.
+Points must be finite and strictly increasing in `x`. Terra stamps them as
+ordinary relation measures, so a matching relation unknown can
+`link-calculation` and graduate normally.
 
 Model calculations use `calculate(inputs, ctx)`, may import standard or
 installed Python packages and package-local helper modules, and return:

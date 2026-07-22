@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -104,6 +105,8 @@ def test_link_run_to_resolved_unknown_warns(tmp_path, monkeypatch, capsys):
         argparse.Namespace(id="u", run_id=r2, primary=False)
     )
     assert rc == 0
-    out = capsys.readouterr().out
-    assert "NOTE: this unknown is resolved by known:fact" in out
-    assert f"terra known link-run fact {r2}" in out
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "success"
+    note = payload["meta"]["note"]
+    assert "this unknown is resolved by known:fact" in note
+    assert f"terra known link-run fact {r2}" in note

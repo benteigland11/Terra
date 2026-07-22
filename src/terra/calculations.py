@@ -8,6 +8,7 @@ import json
 import math
 import platform
 import sys
+import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,7 +18,8 @@ from .map_inputs import parse_map_bindings, resolve_map_bindings
 from .paths import calculation_dir, calculations_root, ensure_calculations_store
 
 _ALLOWED_CALLS = {"abs", "all", "any", "len", "max", "min", "round", "sum"}
-_ALLOWED_TYPES = {"number", "boolean"}
+_SCALAR_OUTPUT_TYPES = {"number", "boolean"}
+_MODEL_OUTPUT_TYPES = {*_SCALAR_OUTPUT_TYPES, "relation"}
 _PROFILES = {"expression", "model"}
 
 
@@ -51,6 +53,15 @@ def _package_hash(cdir: Path, profile: str) -> str:
     return digest.hexdigest()
 
 
+def calculation_source_hash(project_root: Path, calculation_id: str) -> str:
+    """Current package hash for evidence freshness checks."""
+    rec = load_calculation(project_root, calculation_id)
+    return _package_hash(
+        calculation_dir(project_root, calculation_id),
+        rec.get("profile") or "expression",
+    )
+
+
 def _validate_slug(value: str, label: str) -> None:
     import re
 
@@ -72,16 +83,37 @@ def parse_output_specs(rows: list[str]) -> dict[str, dict[str, str]]:
         name, sep, spec = raw.partition("=")
         _validate_slug(name.strip(), "output name")
         parts = spec.split(":") if sep else []
-        if len(parts) not in (2, 3) or parts[0] not in _ALLOWED_TYPES:
+        if not parts or parts[0] not in _MODEL_OUTPUT_TYPES:
             raise ValueError(
-                "outputs must be NAME=number|boolean:QUANTITY[:UNIT]"
+                "outputs must be NAME=number|boolean:QUANTITY[:UNIT] or "
+                "NAME=relation:Y_QUANTITY:X_QUANTITY[:Y_UNIT[:X_UNIT]]"
             )
-        _validate_slug(parts[1], "output quantity")
-        outputs[name.strip()] = {
-            "type": parts[0],
-            "quantity": parts[1],
-            "unit": parts[2] if len(parts) == 3 else "",
-        }
+        if parts[0] == "relation":
+            if len(parts) not in (3, 4, 5):
+                raise ValueError(
+                    "relation output must be "
+                    "NAME=relation:Y_QUANTITY:X_QUANTITY[:Y_UNIT[:X_UNIT]]"
+                )
+            _validate_slug(parts[1], "output quantity")
+            _validate_slug(parts[2], "output x quantity")
+            outputs[name.strip()] = {
+                "type": "relation",
+                "quantity": parts[1],
+                "x_quantity": parts[2],
+                "unit": parts[3] if len(parts) >= 4 else "",
+                "x_unit": parts[4] if len(parts) == 5 else "",
+            }
+        else:
+            if len(parts) not in (2, 3):
+                raise ValueError(
+                    "scalar output must be NAME=number|boolean:QUANTITY[:UNIT]"
+                )
+            _validate_slug(parts[1], "output quantity")
+            outputs[name.strip()] = {
+                "type": parts[0],
+                "quantity": parts[1],
+                "unit": parts[2] if len(parts) == 3 else "",
+            }
     return outputs
 
 
@@ -106,7 +138,7 @@ def create_calculation(
         if output_type is None or quantity is None:
             raise ValueError("expression calculations require output type and quantity")
         _validate_slug(quantity, "output quantity")
-        if output_type not in _ALLOWED_TYPES:
+        if output_type not in _SCALAR_OUTPUT_TYPES:
             raise ValueError("calculation output type must be number or boolean")
     elif not outputs:
         raise ValueError("model calculations require at least one declared output")
@@ -156,11 +188,17 @@ def create_calculation(
     first_input = next(iter(inputs))
     if profile == "model":
         first_output = next(iter(outputs or {}))
+        first_spec = (outputs or {})[first_output]
+        first_payload = (
+            f'{{"points": [{{"x": 0, "value": inputs[{first_input!r}]}}]}}'
+            if first_spec["type"] == "relation"
+            else f'{{"value": inputs[{first_input!r}]}}'
+        )
         source = (
             '"""Model calculation. Package-local imports are allowed."""\n\n'
             "def calculate(inputs, ctx):\n"
             "    return {\n"
-            f"        \"outputs\": {{{first_output!r}: {{\"value\": inputs[{first_input!r}]}}}},\n"
+            f"        \"outputs\": {{{first_output!r}: {first_payload}}},\n"
             "        \"health\": {\"ok\": True},\n"
             "        \"diagnostics\": {},\n"
             "        \"artifacts\": [],\n"
@@ -281,7 +319,7 @@ def validate_calculation(project_root: Path, calculation_id: str) -> dict[str, A
     except ValueError as exc:
         blocks.append(str(exc))
     output = rec.get("output") or {}
-    if profile == "expression" and output.get("type") not in _ALLOWED_TYPES:
+    if profile == "expression" and output.get("type") not in _SCALAR_OUTPUT_TYPES:
         blocks.append("output.type must be number or boolean")
     if profile == "model":
         outputs = rec.get("outputs")
@@ -289,10 +327,18 @@ def validate_calculation(project_root: Path, calculation_id: str) -> dict[str, A
             blocks.append("model outputs must be a non-empty object")
         else:
             for name, spec in outputs.items():
-                if not isinstance(spec, dict) or spec.get("type") not in _ALLOWED_TYPES:
-                    blocks.append(f"output {name!r} type must be number or boolean")
+                if not isinstance(spec, dict) or spec.get("type") not in _MODEL_OUTPUT_TYPES:
+                    blocks.append(
+                        f"output {name!r} type must be number, boolean, or relation"
+                    )
                 if not isinstance(spec, dict) or not spec.get("quantity"):
                     blocks.append(f"output {name!r} requires quantity")
+                if (
+                    isinstance(spec, dict)
+                    and spec.get("type") == "relation"
+                    and not spec.get("x_quantity")
+                ):
+                    blocks.append(f"relation output {name!r} requires x_quantity")
         runtime = _runtime_manifest(calculation_dir(project_root, calculation_id))
         missing = [name for name, version in runtime["installed"].items() if version is None]
         if missing:
@@ -520,10 +566,18 @@ def run_calculation(project_root: Path, calculation_id: str) -> dict[str, Any]:
         output_rows: dict[str, Any] = {}
         for name, spec in declared.items():
             row = raw["outputs"][name]
-            if not isinstance(row, dict) or set(row) != {"value"}:
-                raise ValueError(f"model output {name!r} must be exactly {{'value': ...}}")
-            _validate_output_value(name, row["value"], spec["type"])
-            output_rows[name] = {**spec, "value": row["value"]}
+            expected_key = "points" if spec["type"] == "relation" else "value"
+            if not isinstance(row, dict) or set(row) != {expected_key}:
+                raise ValueError(
+                    f"model output {name!r} must be exactly "
+                    f"{{{expected_key!r}: ...}}"
+                )
+            if spec["type"] == "relation":
+                points = _validate_relation_points(name, row["points"])
+                output_rows[name] = {**spec, "points": points}
+            else:
+                _validate_output_value(name, row["value"], spec["type"])
+                output_rows[name] = {**spec, "value": row["value"]}
         diagnostics = raw.get("diagnostics") or {}
         if not isinstance(diagnostics, dict):
             raise ValueError("model diagnostics must be an object")
@@ -539,6 +593,87 @@ def run_calculation(project_root: Path, calculation_id: str) -> dict[str, Any]:
         json.dumps(result, allow_nan=False)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"calculation result must be JSON-serializable: {exc}") from exc
+    # Calculations are instruments over admitted map beliefs. Stamp their
+    # outputs into the shared evidence-run store so unknowns can consume them
+    # through the same link-run → graduate lifecycle as probe observations.
+    from .paths import ensure_runs_store, get_active_map_id, run_dir
+    from .probe_run import RUN_META_NAME, RUN_SCHEMA_VERSION
+
+    ensure_runs_store(project_root)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    evidence_run_id = f"{stamp}_calc_{calculation_id}_{uuid.uuid4().hex[:6]}"
+    evidence_dir = run_dir(project_root, evidence_run_id)
+    evidence_dir.mkdir(parents=True, exist_ok=False)
+    if profile == "expression":
+        measures = [
+            {
+                "quantity": result["quantity"],
+                "value": result["value"],
+                **({"unit": result["unit"]} if result.get("unit") else {}),
+            }
+        ]
+    else:
+        measures = []
+        for name, row in result["outputs"].items():
+            if row["type"] == "relation":
+                measures.extend(
+                    {
+                        "quantity": row["quantity"],
+                        "x_quantity": row["x_quantity"],
+                        "x": point["x"],
+                        "value": point["value"],
+                        "output": name,
+                        **({"unit": row["unit"]} if row.get("unit") else {}),
+                        **(
+                            {"x_unit": row["x_unit"]}
+                            if row.get("x_unit")
+                            else {}
+                        ),
+                    }
+                    for point in row["points"]
+                )
+            else:
+                measures.append(
+                    {
+                        "quantity": row["quantity"],
+                        "value": row["value"],
+                        "output": name,
+                        **({"unit": row["unit"]} if row.get("unit") else {}),
+                    }
+                )
+    evidence_meta = {
+        "schema_version": RUN_SCHEMA_VERSION,
+        "id": evidence_run_id,
+        "source_type": "calculation",
+        "calculation_id": calculation_id,
+        "time": {
+            "started_at": result["calculated_at"],
+            "finished_at": result["calculated_at"],
+            "captured_at": result["calculated_at"],
+            "duration_s": 0.0,
+        },
+        "from": {
+            "calculation_id": calculation_id,
+            "runner": "terra.calculation.run",
+            "profile": profile,
+        },
+        "to": {"kind": "map_composition", "calculation": calculation_id},
+        "status": "ok",
+        "artifacts": result.get("artifacts") or [],
+        "measures": measures,
+        "map_id": get_active_map_id(project_root),
+        "input_bindings": dict(rec.get("inputs") or {}),
+        "inputs": provenance,
+        "conditional": bool(assumptions),
+        "assumptions": assumptions,
+        "calculation_source_sha256": result["source_sha256"],
+    }
+    (evidence_dir / RUN_META_NAME).write_text(
+        json.dumps(evidence_meta, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    result["evidence_run_id"] = evidence_run_id
+    result["evidence_path"] = str((evidence_dir / RUN_META_NAME).relative_to(project_root))
     rec["latest"] = result
     rec.setdefault("runs", []).append(result)
     rec["updated_at"] = result["calculated_at"]
@@ -557,6 +692,38 @@ def _validate_output_value(name: str, value: Any, output_type: str) -> None:
         raise ValueError(f"output {name!r} declared number but returned non-finite value")
     if output_type == "boolean" and not isinstance(value, bool):
         raise ValueError(f"output {name!r} declared boolean but returned non-boolean")
+
+
+def _validate_relation_points(name: str, value: Any) -> list[dict[str, float]]:
+    if not isinstance(value, list) or not value:
+        raise ValueError(f"relation output {name!r} points must be a non-empty list")
+    points: list[dict[str, float]] = []
+    previous_x: float | None = None
+    for index, point in enumerate(value):
+        if not isinstance(point, dict) or set(point) != {"x", "value"}:
+            raise ValueError(
+                f"relation output {name!r} point {index} must be exactly "
+                "{'x': number, 'value': number}"
+            )
+        x = point["x"]
+        y = point["value"]
+        if any(
+            not isinstance(v, (int, float))
+            or isinstance(v, bool)
+            or not math.isfinite(v)
+            for v in (x, y)
+        ):
+            raise ValueError(
+                f"relation output {name!r} point {index} must contain finite numbers"
+            )
+        x_float = float(x)
+        if previous_x is not None and x_float <= previous_x:
+            raise ValueError(
+                f"relation output {name!r} points must be strictly ordered by x"
+            )
+        previous_x = x_float
+        points.append({"x": x_float, "value": float(y)})
+    return points
 
 
 def calculation_staleness(project_root: Path, calculation_id: str) -> dict[str, Any]:

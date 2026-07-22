@@ -321,6 +321,77 @@ def link_run(
     return rec
 
 
+def link_calculation(
+    project_root: Path,
+    unknown_id: str,
+    calculation_id: str,
+    *,
+    output: str | None = None,
+    primary: bool = False,
+) -> dict[str, Any]:
+    """Link the latest fresh calculation result as typed evidence."""
+    from .calculations import get_calculation
+
+    unknown = load_unknown(project_root, unknown_id)
+    result = get_calculation(project_root, calculation_id)
+    profile = result.get("profile") or "expression"
+    selected: dict[str, Any] | None = None
+    if profile == "expression":
+        if output:
+            raise ValueError("--output applies only to profile=model calculations")
+        selected = result
+    elif output:
+        selected = (result.get("outputs") or {}).get(output)
+        if selected is None:
+            raise ValueError(
+                f"calculation {calculation_id!r} has no output {output!r}; "
+                f"choose one of {sorted((result.get('outputs') or {}).keys())}"
+            )
+    elif unknown.get("type") in (*SCALAR_TYPES, "relation"):
+        matches = [
+            row
+            for row in (result.get("outputs") or {}).values()
+            if row.get("type") == unknown.get("type")
+            and row.get("quantity") == unknown.get("quantity")
+            and (
+                unknown.get("type") != "relation"
+                or row.get("x_quantity") == unknown.get("x_quantity")
+            )
+        ]
+        if len(matches) != 1:
+            raise ValueError(
+                "model calculation output is ambiguous for this unknown; "
+                "pass --output <name>"
+            )
+        selected = matches[0]
+
+    if unknown.get("type") in (*SCALAR_TYPES, "relation") and selected is not None:
+        if selected.get("type") != unknown.get("type"):
+            raise ValueError(
+                f"calculation output type={selected.get('type')!r} does not "
+                f"match unknown type={unknown.get('type')!r}"
+            )
+        if selected.get("quantity") != unknown.get("quantity"):
+            raise ValueError(
+                f"calculation output quantity={selected.get('quantity')!r} does "
+                f"not match unknown quantity={unknown.get('quantity')!r}"
+            )
+        if unknown.get("type") == "relation" and selected.get(
+            "x_quantity"
+        ) != unknown.get("x_quantity"):
+            raise ValueError(
+                f"calculation output x_quantity={selected.get('x_quantity')!r} "
+                f"does not match unknown x_quantity={unknown.get('x_quantity')!r}"
+            )
+    run_id = result.get("evidence_run_id")
+    if not isinstance(run_id, str) or not run_id:
+        raise ValueError(
+            f"calculation {calculation_id!r} predates calculation evidence runs; "
+            "rerun it with `terra calculation run`"
+        )
+    return link_run(project_root, unknown_id, run_id, primary=primary)
+
+
 def unlink_run(
     project_root: Path, unknown_id: str, run_id: str
 ) -> dict[str, Any]:

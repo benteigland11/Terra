@@ -613,17 +613,13 @@ def recompute_formula_node(
 
 
 def derive_confidence_formula(stats: dict[str, Any]) -> str:
-    """low: n>=1 evaluable; med: n>=3 and holds; high: n>=5 and holds_rate>=0.8."""
+    """Derive confidence in the verdict, independently of pass/fail."""
     n = int(stats.get("n") or 0)
     if n < 1 or stats.get("error"):
         return "low"
-    holds = stats.get("holds")
-    rate = stats.get("holds_rate")
-    if n >= 5 and holds is True and rate is not None and float(rate) >= 0.8:
+    if n >= 5:
         return "high"
-    if n >= 3 and holds is True:
-        return "med"
-    if n >= 3 and rate is not None and float(rate) >= 0.8:
+    if n >= 3:
         return "med"
     return "low"
 
@@ -636,13 +632,6 @@ def can_claim_formula_confidence(
     derived = derive_confidence_formula(stats)
     if confidence_rank(want) <= confidence_rank(derived):
         return True, derived
-    if want in ("med", "high") and stats.get("holds") is False:
-        return (
-            False,
-            f"cannot claim confidence={want!r}: formula does not hold "
-            f"(holds={stats.get('holds')}, holds_rate={stats.get('holds_rate')}, "
-            f"n={stats.get('n')})",
-        )
     return (
         False,
         f"cannot claim confidence={want!r} for formula with n={stats.get('n')}, "

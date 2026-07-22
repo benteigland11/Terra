@@ -50,11 +50,17 @@ No arbitrary Python, imports, or attribute access.
 
 | derived | when |
 | ------- | ---- |
-| **low** | n≥1 evaluable (or formula fails / unevaluable) |
-| **med** | n≥3 and `holds` (or holds_rate ≥ 0.8) |
-| **high** | n≥5 and holds and holds_rate ≥ 0.8 |
+| **low** | n≥1 evaluable |
+| **med** | n≥3 |
+| **high** | n≥5 |
 
-`promote med/high` **blocks** if the formula does not hold on current evidence.
+Confidence describes confidence in the verdict, not whether the verdict is
+favorable. A failed formula can therefore be high confidence. A formula known
+with `holds: false` fails `terra gate` until new evidence makes it hold or the
+belief is retired/replaced. `terra map status` exposes this as
+`verdict: "fail"` plus blocking `known_formula_failed` attention and a
+`known.show` next action, so agents see the negative result without first
+running the release gate.
 
 ## Stack
 

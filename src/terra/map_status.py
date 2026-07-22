@@ -243,6 +243,28 @@ def collect_map_status(
                     "confidence_derived"
                 ),
                 "n": ((k.get("record") or {}).get("stats") or {}).get("n"),
+                **(
+                    {
+                        "holds": ((k.get("record") or {}).get("stats") or {}).get(
+                            "holds"
+                        ),
+                        "verdict": (
+                            "pass"
+                            if ((k.get("record") or {}).get("stats") or {}).get(
+                                "holds"
+                            )
+                            is True
+                            else "fail"
+                            if ((k.get("record") or {}).get("stats") or {}).get(
+                                "holds"
+                            )
+                            is False
+                            else "unresolved"
+                        ),
+                    }
+                    if (k.get("record") or {}).get("type") == "formula"
+                    else {}
+                ),
                 "runs": len((k.get("record") or {}).get("run_ids") or []),
                 "methods": (
                     (((k.get("record") or {}).get("stats") or {}).get(
@@ -312,7 +334,10 @@ def collect_map_status(
         "runs_recent": [
             {
                 "id": r.get("id"),
+                "source_type": (r.get("record") or {}).get("source_type")
+                or "probe",
                 "probe_id": (r.get("record") or {}).get("probe_id"),
+                "calculation_id": (r.get("record") or {}).get("calculation_id"),
                 "status": (r.get("record") or {}).get("status"),
                 "voided": bool((r.get("record") or {}).get("voided")),
                 "ok": r.get("ok"),
@@ -567,6 +592,35 @@ def _derive_agent_guidance(
                 )
                 # Deliberately retired: don't also alarm as unbacked/stale/etc.
                 continue
+            if k.get("type") == "formula" and k.get("holds") is False:
+                attention.append(
+                    attention_item(
+                        "known_formula_failed",
+                        id=kid,
+                        severity="block",
+                        why=(
+                            f"formula known {kid} on map {mid} has verdict=fail "
+                            f"(claimed confidence={k.get('confidence')}, "
+                            f"derived={k.get('confidence_derived')}, n={k.get('n')})"
+                        ),
+                        extra={
+                            "map_id": mid,
+                            "holds": False,
+                            "verdict": "fail",
+                            "confidence": k.get("confidence"),
+                            "confidence_derived": k.get("confidence_derived"),
+                        },
+                    )
+                )
+                next_actions.append(
+                    action(
+                        "known.show",
+                        ["terra", *map_flag, "known", "show", kid, "--json"],
+                        why="inspect the evidence-backed failing formula",
+                        priority=8,
+                        map_id=mid,
+                    )
+                )
             if k.get("evidence_input_stale"):
                 attention.append(
                     attention_item(

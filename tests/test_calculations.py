@@ -11,6 +11,7 @@ from terra.calculations import (
     calculation_staleness,
     create_calculation,
     get_calculation,
+    parse_output_specs,
     parse_bindings,
     run_calculation,
     validate_calculation,
@@ -18,10 +19,13 @@ from terra.calculations import (
 from terra.paths import calculation_dir
 from terra.gate import check_gate
 from terra.knowns import graduate_unknown
+from terra.knowns import load_known
 from terra.map_status import collect_status_board
 from terra.probe_init import init_probe
 from terra.probe_run import run_probe
-from terra.unknowns import create_unknown, link_run
+from terra.readings import read_known
+from terra.run_validate import validate_run_id
+from terra.unknowns import create_unknown, link_calculation, link_run
 
 
 def _assumption(root: Path, assumption_id: str, value: float) -> None:
@@ -333,11 +337,165 @@ def test_known_only_calculation_is_clean(tmp_path: Path, monkeypatch):
     assert result["assumptions"] == []
 
 
+def test_calculation_result_is_evidence_that_graduates_to_derived_known(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    _known(tmp_path, "width", 4.0)
+    create_calculation(
+        tmp_path,
+        "double_width",
+        inputs={"width": "known:width"},
+        output_type="number",
+        quantity="derived_width",
+        unit="m",
+    )
+    cpath = calculation_dir(tmp_path, "double_width") / "calc.py"
+    cpath.write_text(
+        'def calculate(inputs):\n    return {"value": inputs["width"] * 2}\n',
+        encoding="utf-8",
+    )
+    result = run_calculation(tmp_path, "double_width")
+    run_id = result["evidence_run_id"]
+    validation = validate_run_id(tmp_path, run_id)
+    assert validation["ok"] is True
+    assert validation["record"]["source_type"] == "calculation"
+    assert validation["record"]["calculation_id"] == "double_width"
+
+    create_unknown(
+        tmp_path,
+        "derived_width",
+        claim="What is derived width?",
+        evidence_needed="validated composition",
+        map_type="number",
+        quantity="derived_width",
+        unit="m",
+    )
+    unknown = link_calculation(tmp_path, "derived_width", "double_width")
+    assert unknown["run_ids"] == [run_id]
+    assert unknown["stats"]["mean"] == 8.0
+    known = graduate_unknown(tmp_path, "derived_width")
+    assert known["stats"]["mean"] == 8.0
+    assert known["conditional"] is False
+    assert [d["id"] for d in known["deps"]["knowns"]] == ["width"]
+    assert read_known(tmp_path, "derived_width")["value"] == 8.0
+
+    cpath.write_text(cpath.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="stale probe inputs"):
+        read_known(tmp_path, "derived_width")
+    assert any(
+        v["kind"] == "evidence_input_stale" and v["id"] == "derived_width"
+        for v in check_gate(tmp_path)["violations"]
+    )
+
+
+def test_assumption_conditioned_calculation_evidence_stays_conditional(tmp_path: Path):
+    _assumption(tmp_path, "working_width", 3.0)
+    create_calculation(
+        tmp_path,
+        "conditional_width",
+        inputs={"width": "assumption:working_width"},
+        output_type="number",
+        quantity="derived_width",
+    )
+    run_calculation(tmp_path, "conditional_width")
+    create_unknown(
+        tmp_path,
+        "derived_width",
+        claim="What is derived width?",
+        evidence_needed="validated composition",
+        map_type="number",
+        quantity="derived_width",
+    )
+    link_calculation(tmp_path, "derived_width", "conditional_width")
+    known = graduate_unknown(tmp_path, "derived_width")
+    assert known["conditional"] is True
+    assert known["assumptions"] == ["working_width"]
+    reading = read_known(tmp_path, "derived_width")
+    assert reading["conditional"] is True
+    assert reading["assumptions"] == ["working_width"]
+
+
 def test_binding_contract_rejects_unknowns_and_literals():
     with pytest.raises(ValueError, match="only"):
         parse_bindings(["x=unknown:x"])
     with pytest.raises(ValueError, match="only"):
         parse_bindings(["x=literal:3"])
+
+
+def test_model_relation_output_can_evidence_and_graduate_relation(tmp_path: Path):
+    _assumption(tmp_path, "slope", 0.1)
+    outputs = parse_output_specs(["polar=relation:cl:alpha_deg::deg"])
+    assert outputs["polar"] == {
+        "type": "relation",
+        "quantity": "cl",
+        "x_quantity": "alpha_deg",
+        "unit": "",
+        "x_unit": "deg",
+    }
+    create_calculation(
+        tmp_path,
+        "polar_model",
+        inputs={"slope": "assumption:slope"},
+        output_type=None,
+        quantity=None,
+        profile="model",
+        outputs=outputs,
+    )
+    (calculation_dir(tmp_path, "polar_model") / "calc.py").write_text(
+        "def calculate(inputs, ctx):\n"
+        "    s = inputs['slope']\n"
+        "    return {'outputs': {'polar': {'points': [\n"
+        "        {'x': -2, 'value': -2*s},\n"
+        "        {'x': 0, 'value': 0},\n"
+        "        {'x': 4, 'value': 4*s},\n"
+        "    ]}}, 'health': {'ok': True}, 'diagnostics': {}, 'artifacts': []}\n",
+        encoding="utf-8",
+    )
+    result = run_calculation(tmp_path, "polar_model")
+    assert result["outputs"]["polar"]["points"][2] == {"x": 4.0, "value": 0.4}
+
+    create_unknown(
+        tmp_path,
+        "cl_curve",
+        claim="What is CL(alpha)?",
+        evidence_needed="derived polar sweep",
+        map_type="relation",
+        quantity="cl",
+        x_quantity="alpha_deg",
+        x_unit="deg",
+    )
+    unknown = link_calculation(
+        tmp_path, "cl_curve", "polar_model", output="polar"
+    )
+    assert unknown["stats"]["n"] == 1
+    assert unknown["stats"]["station_count"] == 3
+    known = graduate_unknown(tmp_path, "cl_curve")
+    assert known["type"] == "relation"
+    assert known["conditional"] is True
+    assert read_known(tmp_path, "cl_curve", at=2)["value"] == pytest.approx(0.2)
+
+
+def test_model_relation_output_rejects_unordered_or_nonfinite_points(tmp_path: Path):
+    _assumption(tmp_path, "slope", 0.1)
+    create_calculation(
+        tmp_path,
+        "bad_curve",
+        inputs={"slope": "assumption:slope"},
+        output_type=None,
+        quantity=None,
+        profile="model",
+        outputs=parse_output_specs(["curve=relation:y:x"]),
+    )
+    (calculation_dir(tmp_path, "bad_curve") / "calc.py").write_text(
+        "def calculate(inputs, ctx):\n"
+        "    return {'outputs': {'curve': {'points': ["
+        "{'x': 1, 'value': 2}, {'x': 0, 'value': 3}]}}, "
+        "'health': {'ok': True}, 'diagnostics': {}, 'artifacts': []}\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="strictly ordered"):
+        run_calculation(tmp_path, "bad_curve")
 
 
 def test_source_change_makes_result_stale(tmp_path: Path):

@@ -31,9 +31,15 @@ def validate_run_record(
     elif expected_id is not None and rid != expected_id:
         blocks.append(f"id {rid!r} does not match directory name {expected_id!r}")
 
-    probe_id = data.get("probe_id")
-    if not isinstance(probe_id, str) or not probe_id.strip():
-        blocks.append("probe_id must be a non-empty string")
+    source_type = data.get("source_type") or "probe"
+    if source_type == "calculation":
+        calculation_id = data.get("calculation_id")
+        if not isinstance(calculation_id, str) or not calculation_id.strip():
+            blocks.append("calculation evidence requires calculation_id")
+    else:
+        probe_id = data.get("probe_id")
+        if not isinstance(probe_id, str) or not probe_id.strip():
+            blocks.append("probe_id must be a non-empty string")
 
     # time (substrate)
     time = data.get("time")
@@ -54,8 +60,9 @@ def validate_run_record(
     if not isinstance(frm, dict) or not frm:
         blocks.append("from must be a non-empty object (instrument + execution context)")
     else:
-        if not isinstance(frm.get("probe_id"), str) or not str(frm.get("probe_id")).strip():
-            blocks.append("from.probe_id must be a non-empty string")
+        source_key = "calculation_id" if source_type == "calculation" else "probe_id"
+        if not isinstance(frm.get(source_key), str) or not str(frm.get(source_key)).strip():
+            blocks.append(f"from.{source_key} must be a non-empty string")
         if not isinstance(frm.get("runner"), str) or not str(frm.get("runner")).strip():
             blocks.append("from.runner must be a non-empty string")
 

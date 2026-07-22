@@ -33,6 +33,7 @@ terra unknown create <id> --claim "…" --evidence "…"
 terra unknown list
 terra unknown link-probe <id> <probe_id>
 terra unknown link-run <id> <run_id> [--primary]
+terra unknown link-calculation <id> <calculation_id> [--output <model_output>]
 terra unknown unlink-run <id> <run_id>
 terra unknown show <id>          # probes + linked runs + last status
 terra unknown status <id> resolved   # ok if run_ids already linked

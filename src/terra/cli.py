@@ -169,13 +169,32 @@ def _print_probe_result(result: dict, *, json_out: bool) -> int:
 
 def cmd_init(args: argparse.Namespace) -> int:
     root = Path(args.path).resolve() if args.path else Path.cwd().resolve()
-    ensure_map_store(root)
-    print(f"initialized {root / '.terra' / 'map'}  (global map)")
-    print(f"  probes+lib: global shared")
-    print(f"  active map: {get_active_map_id(root)}")
-    print(f"  belief path: {map_root(root)}")
-    print("  tip: terra map create <exp> --use  # experiment-scoped knowns/runs")
-    return 0
+    try:
+        ensure_map_store(root)
+    except (ValueError, OSError) as e:
+        return emit(error(str(e), code="init"))
+    return emit(
+        success(
+            {
+                "project_root": str(root),
+                "map_id": GLOBAL_MAP_ID,
+                "active_map": get_active_map_id(root),
+                "belief_path": str(map_root(root)),
+                "probes_path": str(probes_root(root)),
+                "next_actions": [
+                    {
+                        "op": "map.create",
+                        "argv": [
+                            "terra", "map", "create", "<experiment>",
+                            "--purpose", "<purpose>", "--use",
+                        ],
+                        "why": "isolate experimental beliefs from global",
+                    }
+                ],
+            },
+            meta={"surface": "terra.init"},
+        )
+    )
 
 
 def cmd_map_create(args: argparse.Namespace) -> int:
@@ -1000,14 +1019,27 @@ def cmd_probe_create(args: argparse.Namespace) -> int:
             inputs=parse_map_bindings(args.input or []),
         )
     except (ValueError, FileExistsError, OSError) as e:
-        print(f"error: {e}", file=sys.stderr)
-        return 1
-    if created_store:
-        print(f"initialized {root / '.terra' / 'map'}")
-    print(f"created probe {args.id}  kind={args.kind}")
-    print(f"  {pdir}")
-    print("  next: edit probe.py, then `terra probe validate " + args.id + "`")
-    return 0
+        return emit(error(str(e), code="probe_create"))
+    rec = json.loads((pdir / "probe.json").read_text(encoding="utf-8"))
+    return emit(
+        success(
+            {
+                **rec,
+                "next_actions": [
+                    {
+                        "op": "probe.validate",
+                        "argv": ["terra", "probe", "validate", args.id],
+                        "why": "validate the implemented probe contract",
+                    }
+                ],
+            },
+            meta={
+                "surface": "terra.probe.create",
+                "path": str(pdir),
+                "initialized_store": bool(created_store),
+            },
+        )
+    )
 
 
 def cmd_unknown_create(args: argparse.Namespace) -> int:
@@ -1037,25 +1069,41 @@ def cmd_unknown_create(args: argparse.Namespace) -> int:
             x_unit=getattr(args, "x_unit", "") or "",
         )
     except (ValueError, FileExistsError, OSError) as e:
-        print(f"error: {e}", file=sys.stderr)
-        return 1
-    if created_store:
-        print(f"initialized {root / '.terra' / 'map'}")
-    # create --probe starts in probing (same as link-probe)
-    status = "probing" if args.probe else "open"
-    print(f"created unknown {args.id}  status={status}")
-    if getattr(args, "type", None) == "formula":
-        print(f"  type=formula  expr={getattr(args, 'expression', '')!r}")
-    print(f"  {path}")
-    if args.probe:
-        print(f"  linked probe: {args.probe}")
-    else:
-        print(
-            "  next: terra probe create <id> --purpose \"…\"  "
-            "OR  terra unknown link-probe …"
-        )
+        return emit(error(str(e), code="unknown_create"))
+    rec = load_unknown(root, args.id)
     _announce_write_target(root, "unknown create")
-    return 0
+    next_actions = (
+        [
+            {
+                "op": "probe.create",
+                "argv": [
+                    "terra", "probe", "create", "<id>",
+                    "--purpose", "<purpose>",
+                ],
+                "why": "build an instrument for this unknown",
+            },
+            {
+                "op": "unknown.link_probe",
+                "argv": [
+                    "terra", "unknown", "link-probe", args.id,
+                    "<probe_id>",
+                ],
+                "why": "attach an existing instrument",
+            },
+        ]
+        if not args.probe
+        else []
+    )
+    return emit(
+        success(
+            {**rec, "next_actions": next_actions},
+            meta={
+                "surface": "terra.unknown.create",
+                "path": str(path),
+                "initialized_store": bool(created_store),
+            },
+        )
+    )
 
 
 def cmd_unknown_list(args: argparse.Namespace) -> int:
@@ -1289,7 +1337,18 @@ def cmd_calculation_run(args: argparse.Namespace) -> int:
         result = run_calculation(root, args.id)
     except (ValueError, FileNotFoundError, OSError) as exc:
         return emit(error(str(exc), code="calculation_run"))
-    return emit(success(result, meta={"surface": "terra.calculation.run"}))
+    return emit(
+        success(
+            result,
+            meta={
+                "surface": "terra.calculation.run",
+                "note": (
+                    "calculation stamped an evidence run; link it with "
+                    "terra unknown link-calculation <unknown> " + args.id
+                ),
+            },
+        )
+    )
 
 
 def cmd_calculation_get(args: argparse.Namespace) -> int:
@@ -2353,21 +2412,23 @@ def cmd_unknown_status(args: argparse.Namespace) -> int:
             notes=args.notes,
         )
     except (ValueError, FileNotFoundError, OSError) as e:
-        print(f"error: {e}", file=sys.stderr)
-        return 1
-    print(f"unknown {rec['id']}  status={rec['status']}")
+        return emit(error(str(e), code="unknown_status"))
+    note = None
     if (
         args.status == "resolved"
         and rec.get("type")
         and (rec.get("run_ids") or [])
         and not str(rec.get("resolved_by") or "").startswith("known:")
     ):
-        print(
-            f"  NOTE: this unknown is typed with linked runs — a prose "
+        note = (
+            f"this unknown is typed with linked runs — a prose "
             f"resolve keeps NO durable anchor. If the answer should live "
             f"on:\n    terra unknown graduate {rec['id']}"
         )
-    return 0
+    meta = {"surface": "terra.unknown.status"}
+    if note:
+        meta["note"] = note
+    return emit(success(rec, meta=meta))
 
 
 def cmd_unknown_graduate(args: argparse.Namespace) -> int:
@@ -2392,41 +2453,49 @@ def cmd_unknown_graduate(args: argparse.Namespace) -> int:
             cohort_id=getattr(args, "cohort_id", None),
         )
     except (ValueError, FileExistsError, FileNotFoundError, OSError) as e:
-        print(f"error: {e}", file=sys.stderr)
-        return 1
+        return emit(error(str(e), code="unknown_graduate"))
     _announce_write_target(root, "unknown graduate")
-    if getattr(args, "json", False):
-        print(json.dumps(rec, indent=2, default=str))
-        return 0
-    from .paths import known_path as _known_path
-
-    _print_known_summary(
-        "merged into" if getattr(args, "into", None) else "graduated",
-        rec,
-        _known_path(root, rec["id"]),
-    )
     resolved = [args.id] + (with_ids or [])
-    print(
-        f"  unknown(s) {', '.join(resolved)} resolved "
-        f"(resolved_by=known:{rec['id']})\n"
-        f"  next: terra known link-run {rec['id']} <run_id>  "
-        f"then  terra known promote {rec['id']} med"
-    )
     from .knowns import shadowed_ancestor
 
     try:
         shadow = shadowed_ancestor(root, rec["id"])
     except ValueError:
         shadow = None
+    note = None
     if shadow:
-        print(
-            f"  NOTE: this known SHADOWS {shadow}'s {rec['id']!r} — reads on "
+        note = (
+            f"this known SHADOWS {shadow}'s {rec['id']!r} — reads on "
             f"this map subtree now see the local value, not the inherited "
             f"one. Rename if that's unintended, or adopt up when it proves "
             f"out: terra known adopt {rec['id']} --from "
             f"{get_active_map_id(root)}"
         )
-    return 0
+    data = {
+        **rec,
+        "resolved_unknown_ids": resolved,
+        "next_actions": [
+            {
+                "op": "known.link_run",
+                "argv": [
+                    "terra", "known", "link-run", rec["id"], "<run_id>",
+                ],
+                "why": "add an independent reading before promotion",
+            },
+            {
+                "op": "known.promote",
+                "argv": ["terra", "known", "promote", rec["id"], "med"],
+                "why": "promote after the evidence ladder is satisfied",
+            },
+        ],
+    }
+    meta = {
+        "surface": "terra.unknown.graduate",
+        "action": "merged" if getattr(args, "into", None) else "graduated",
+    }
+    if note:
+        meta["note"] = note
+    return emit(success(data, meta=meta))
 
 
 def cmd_unknown_link_probe(args: argparse.Namespace) -> int:
@@ -2434,14 +2503,10 @@ def cmd_unknown_link_probe(args: argparse.Namespace) -> int:
         root = require_project_root()
         rec = link_probe(root, args.id, args.probe_id)
     except (ValueError, FileNotFoundError, OSError) as e:
-        print(f"error: {e}", file=sys.stderr)
-        return 1
-    pids = rec.get("probe_ids") or []
-    print(
-        f"unknown {rec['id']}  primary={rec.get('probe_id')}  "
-        f"probe_ids={pids}  status={rec['status']}"
+        return emit(error(str(e), code="unknown_link_probe"))
+    return emit(
+        success(rec, meta={"surface": "terra.unknown.link_probe"})
     )
-    return 0
 
 
 def cmd_unknown_link_run(args: argparse.Namespace) -> int:
@@ -2451,12 +2516,8 @@ def cmd_unknown_link_run(args: argparse.Namespace) -> int:
             root, args.id, args.run_id, primary=bool(args.primary)
         )
     except (ValueError, FileNotFoundError, OSError) as e:
-        print(f"error: {e}", file=sys.stderr)
-        return 1
-    print(
-        f"unknown {rec['id']}  run_ids={rec.get('run_ids')}  "
-        f"primary_run={rec.get('primary_run_id')}  status={rec['status']}"
-    )
+        return emit(error(str(e), code="unknown_link_run"))
+    note = None
     if rec.get("status") in ("resolved", "wont_care"):
         resolved_by = str(rec.get("resolved_by") or "")
         hint = (
@@ -2465,12 +2526,43 @@ def cmd_unknown_link_run(args: argparse.Namespace) -> int:
             if resolved_by.startswith("known:")
             else "    (runs on a closed unknown feed nothing downstream)"
         )
-        print(
-            f"  NOTE: this unknown is {rec['status']}"
+        note = (
+            f"this unknown is {rec['status']}"
             f"{' by ' + resolved_by if resolved_by else ''} — linked runs "
             f"here feed NO known's stats. Did you mean:\n{hint}"
         )
-    return 0
+    meta = {"surface": "terra.unknown.link_run"}
+    if note:
+        meta["note"] = note
+    return emit(success(rec, meta=meta))
+
+
+def cmd_unknown_link_calculation(args: argparse.Namespace) -> int:
+    try:
+        root = require_project_root()
+        from .unknowns import link_calculation
+
+        rec = link_calculation(
+            root,
+            args.id,
+            args.calculation_id,
+            output=args.output,
+            primary=bool(args.primary),
+        )
+    except (ValueError, FileNotFoundError, OSError) as exc:
+        return emit(error(str(exc), code="unknown_link_calculation"))
+    return emit(
+        success(
+            rec,
+            meta={
+                "surface": "terra.unknown.link_calculation",
+                "note": (
+                    f"linked calculation evidence; graduate when the claim is "
+                    f"answered: terra unknown graduate {args.id}"
+                ),
+            },
+        )
+    )
 
 
 def cmd_unknown_unlink_run(args: argparse.Namespace) -> int:
@@ -3693,6 +3785,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_ulr.set_defaults(func=cmd_unknown_link_run)
 
+    p_ulc = unk_sub.add_parser(
+        "link-calculation",
+        help="Link the latest fresh calculation result as evidence",
+    )
+    p_ulc.add_argument("id", help="Unknown id")
+    p_ulc.add_argument("calculation_id", help="Calculation id")
+    p_ulc.add_argument(
+        "--output",
+        default=None,
+        help="Model output name (optional when type+quantity identify one output)",
+    )
+    p_ulc.add_argument("--primary", action="store_true")
+    p_ulc.set_defaults(func=cmd_unknown_link_calculation)
+
     p_uur = unk_sub.add_parser(
         "unlink-run",
         help="Remove a run id from an unknown; recompute typed stats",
@@ -3803,8 +3909,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--output",
         action="append",
         default=None,
-        metavar="NAME=number|boolean:QUANTITY[:UNIT]",
-        help="Declared model output (repeatable)",
+        metavar="NAME=TYPE:QUANTITY[:…]",
+        help=(
+            "Declared model output (repeatable): number|boolean:Q[:UNIT] or "
+            "relation:Y_Q:X_Q[:Y_UNIT[:X_UNIT]]"
+        ),
     )
     p_cc.add_argument("--unit", default="")
     p_cc.add_argument(
