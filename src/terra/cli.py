@@ -578,7 +578,11 @@ def cmd_route_log(args: argparse.Namespace) -> int:
 
     try:
         root = require_project_root()
-        out = route_log(root, limit=int(args.limit or 0))
+        out = route_log(
+            root,
+            limit=int(args.limit or 0),
+            task_id=getattr(args, "task", None),
+        )
     except (FileNotFoundError, ValueError, OSError) as e:
         return emit(error(str(e), code="route_log"))
     if args.human:
@@ -2223,6 +2227,33 @@ def cmd_gate(args: argparse.Namespace) -> int:
     return 0 if verdict["ok"] else 1
 
 
+def cmd_sitrep(args: argparse.Namespace) -> int:
+    """One-call orientation digest. ALWAYS exits 0 on success.
+
+    Deliberately does NOT adopt `gate`'s exit-1-on-violation semantics: a
+    nonzero exit silently aborts `&&` chains, so a batched shell call would
+    lose every command after a failing gate and look clean. The verdict is
+    data (`data.gate.ok`), not an exit code.
+    """
+    from .agent_io import emit, error, success
+    from .sitrep import collect_sitrep, format_sitrep_text
+
+    try:
+        root = require_project_root()
+        rep = collect_sitrep(
+            root,
+            full=bool(getattr(args, "full", False)),
+            map_id=getattr(args, "map_scope", None),
+        )
+    except (ValueError, FileNotFoundError, OSError) as e:
+        return emit(error(str(e), code="sitrep"))
+    if getattr(args, "human", False):
+        print(format_sitrep_text(rep))
+        return 0
+    emit(success(rep, meta={"surface": "terra.sitrep"}))
+    return 0
+
+
 def cmd_known_link_run(args: argparse.Namespace) -> int:
     try:
         root = require_project_root()
@@ -2990,6 +3021,15 @@ def cmd_probe_run(args: argparse.Namespace) -> int:
     if not args.dry_run:
         _announce_write_target(root, "probe run")
 
+    val = stamp.get("validation") or {}
+    if val.get("revalidated"):
+        print(
+            f"NOTE: probe {args.id} was re-validated before this run "
+            f"({val.get('reason') or 'stamp missing/stale'}) — validation "
+            "stamp refreshed",
+            file=sys.stderr,
+        )
+
     if args.json:
         out = {k: v for k, v in stamp.items() if not str(k).startswith("_")}
         out["path"] = stamp.get("_path")
@@ -3284,6 +3324,13 @@ def cmd_probe_validate(args: argparse.Namespace) -> int:
         result = validate_probe_dir(pdir)
     rc = _print_probe_result(result, json_out=args.json)
     if rc == 0 and not args.json:
+        st = result.get("stamp") or {}
+        if st.get("source_sha256"):
+            print(
+                f"  stamped: validated {st.get('validated_at')} "
+                f"source {str(st['source_sha256'])[:12]}… "
+                "(probe run refuses an unvalidated/edited probe)"
+            )
         try:
             src = (pdir / "probe.py").read_text(encoding="utf-8")
         except OSError:
@@ -3711,6 +3758,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_us.add_argument("id")
     p_us.add_argument("--json", action="store_true", help="Machine-readable describe")
     p_us.set_defaults(func=cmd_unknown_show)
+
+    # `known get` is THE read verb, so agents reach for `unknown get` and hit
+    # a phantom command; the nearest-looking verb, `unknown status`, is a
+    # SETTER that errors without its positional. Alias the reader so the verb
+    # is symmetric across both node types.
+    p_ug = unk_sub.add_parser(
+        "get",
+        help="Alias of `unknown show` — symmetric with `known get`",
+    )
+    p_ug.add_argument("id")
+    p_ug.add_argument("--json", action="store_true", help="Machine-readable describe")
+    p_ug.set_defaults(func=cmd_unknown_show)
 
     p_ust = unk_sub.add_parser("status", help="Set status (open|probing|blocked|resolved|wont_care)")
     p_ust.add_argument("id")
@@ -4642,6 +4701,42 @@ def build_parser() -> argparse.ArgumentParser:
     p_gate.add_argument("--human", action="store_true", help="Prose output")
     p_gate.set_defaults(func=cmd_gate)
 
+    p_sit = sub.add_parser(
+        "sitrep",
+        help="ONE-CALL orientation: brief + route + budget + map + gate "
+        "digest. Start every session here instead of 5 separate reads.",
+        description=(
+            "Composite read that replaces the `route status` + `route budget` "
+            "+ `map status` + `known list` + `gate` opening sequence with a "
+            "single command. Returns a DIGEST (counts, merged attention, "
+            "next actions, gate verdict) — not the full task/known tables. "
+            "ALWAYS exits 0 on success, even when the gate fails, so it is "
+            "safe in a chained shell call; read data.gate.ok for the verdict."
+        ),
+    )
+    p_sit.add_argument(
+        "--full",
+        action="store_true",
+        help="Remove list caps (default truncates and reports what it dropped)",
+    )
+    p_sit.add_argument(
+        "--map",
+        dest="map_scope",
+        default=None,
+        help="Detail scope for map counts (attention always scans all maps)",
+    )
+    # Accepted no-op. JSON is already the default here, but EVERY other read
+    # verb takes --json, so an agent reaching for it got argparse rc=2 and an
+    # EMPTY stdout — which reads downstream as "the JSON is corrupt", not "bad
+    # flag". Cost a lead several turns on 2026-07-27. Consistency beats purity.
+    p_sit.add_argument(
+        "--json",
+        action="store_true",
+        help="Accepted no-op — JSON is already the default output",
+    )
+    p_sit.add_argument("--human", action="store_true", help="Prose output")
+    p_sit.set_defaults(func=cmd_sitrep)
+
     # --- route (task DAG) ---
     p_rt = sub.add_parser(
         "route",
@@ -4663,6 +4758,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_rlog.add_argument(
         "--limit", type=int, default=0, help="Show only the last N events"
+    )
+    p_rlog.add_argument(
+        "--task",
+        default=None,
+        help="One task's history (else every task). Without this a lead had "
+        "to hand-parse route.json — the shadow-tracker habit this verb "
+        "exists to remove.",
     )
     p_rlog.add_argument("--human", action="store_true")
     p_rlog.set_defaults(func=cmd_route_log)

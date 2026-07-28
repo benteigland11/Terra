@@ -27,6 +27,9 @@ def _write_sweep_probe(
         [{"quantity": quantity, "x": x, "value": y} for x, y in points]
     )
     (pdir / "probe.py").write_text(
+        "REQUIRED_EXPORTS = ['to', 'status', 'artifacts']\n"
+        "KIND = 'watch'\n"
+        "DURATION_S = 0\n"
         "def run(ctx=None):\n"
         "    ctx = ctx or {}\n"
         "    to = ctx.get('to') or {'kind': 'default'}\n"

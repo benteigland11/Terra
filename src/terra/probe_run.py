@@ -192,6 +192,13 @@ def run_probe(
     if not pdir.is_dir():
         raise FileNotFoundError(f"unknown probe {probe_id!r} (no {pdir})")
 
+    # An instrument measures only after it has passed level-1 validation for
+    # the exact source it is about to run. Stale/missing stamp → revalidate
+    # now; failure errors out instead of stamping a run.
+    from .probe_stamp import ensure_validated
+
+    validation = ensure_validated(pdir, probe_id=probe_id)
+
     meta = _load_probe_meta(pdir)
     entry = meta.get("entry") or PROBE_ENTRY_DEFAULT
     parsed = _parse_entry(entry if isinstance(entry, str) else PROBE_ENTRY_DEFAULT)
@@ -249,12 +256,19 @@ def run_probe(
     started = _now()
     started_mono = datetime.now(timezone.utc)
     # Keep map lib on sys.path for the whole execute (imports inside run())
-    from .readings import consumer_scope
+    from .readings import consumer_scope, record_reads
+    from .env_reads import record_env_reads, summarize as summarize_env_reads
+
+    # Provenance: a probe reaching into os.environ consumes an input the
+    # declared bindings never mention, which makes a hand-pinned run
+    # indistinguishable from a bare one in the ledger. Record the reads.
+    env_sink: dict[str, Any] = {}
+    read_sink: list[dict[str, Any]] = []
 
     try:
         with probe_sys_path(project_root, pdir), consumer_scope(
             f"probe:{probe_id}"
-        ):
+        ), record_env_reads(env_sink), record_reads(read_sink):
             raw = _call_with_timeout(fn, ctx, timeout_eff)
     except FuturesTimeout as e:
         raise TimeoutError(
@@ -316,7 +330,10 @@ def run_probe(
         "inputs": input_snapshots,
         "conditional": bool(input_assumptions),
         "assumptions": input_assumptions,
+        "env_reads": summarize_env_reads(env_sink),
+        "known_reads": read_sink,
         "probe_source_sha256": hashlib.sha256(script_path.read_bytes()).hexdigest(),
+        "validation": validation,
     }
     # Iterative solvers: probe runs the loop internally and reports the
     # settled value. The solve is the sample — iterates never stamp runs.

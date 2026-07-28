@@ -22,6 +22,9 @@ from terra.unknowns import create_unknown, link_run
 def _write_measure_probe(root: Path, probe_id: str, *, quantity: str, value: float) -> None:
     pdir = root / ".terra" / "map" / "probes" / probe_id
     (pdir / "probe.py").write_text(
+        "REQUIRED_EXPORTS = ['to', 'status', 'artifacts']\n"
+        "KIND = 'watch'\n"
+        "DURATION_S = 0\n"
         "def run(ctx=None):\n"
         "    ctx = ctx or {}\n"
         "    to = ctx.get('to') or {'kind': 'default'}\n"

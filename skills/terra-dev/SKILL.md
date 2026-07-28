@@ -500,6 +500,176 @@ the design of record; intended?"). `check_design` returns it under `notices`
 - `unlock-plan` without `--confirm` must fail with WARNING text.  
 - Tests: `tests/test_brief_route.py`.
 
+### 19. sitrep: turns are the unit of cost, and exit codes break chains
+
+`src/terra/sitrep.py` — composite READ (`collect_sitrep`) over `route_status` +
+`collect_status_board` + `check_gate` + `brief_summary`. Pure view: no new
+state, nothing stored (test asserts `.terra` mtimes are unchanged).
+
+Motivation is measured, not aesthetic. An agent turn costs a re-read of its
+whole context (~14k specialist / ~22k lead / ~28k PM tokens) **regardless of
+the command**, so the CLI's one-command-per-invocation shape made orientation
+cost 5 turns. On a real program (CG-01, 11 days): Terra-bearing turns were 26%
+of total token spend while Terra's own OUTPUT was <4% of that — optimizing
+verbosity would have been a rounding error; collapsing round trips was the win.
+
+Three invariants, each with a test that can actually fail (mutation-checked):
+
+1. **ALWAYS exits 0 on success, even when the gate fails.** `terra gate` exits
+   1 by design; 64 CLI paths return nonzero as a *verdict*. Agents batch with
+   `cmd_a && cmd_b`, so a verdict-nonzero silently aborts the rest of the chain
+   and the run still looks clean. sitrep puts the verdict in `data.gate.ok`.
+   If you add a composite/orientation verb, copy this rule.
+2. **Rollup before sample.** 340 open unknowns produce 340 near-identical
+   attention rows; naive truncation to 12 shows twelve copies of one fact and
+   hides every other KIND. `_summarize_attention` counts by
+   (plane, kind, severity) and is never truncated; `_diverse_sample`
+   round-robins across kinds so a rare kind is reached before a common one
+   repeats. This is what made 6 unbacked knowns and 88 blocked tasks visible
+   under a flood of unknowns.
+3. **Truncation is declared, never silent.** `truncated{}` reports what was
+   dropped; `--full` removes caps. Agents were previously doing `| head` on
+   `route status` — `route status` is **2.5 MB** on a large program — which is
+   silent truncation an agent cannot distinguish from a short list.
+
+Route attention rows carry no `map_id`; sitrep tags both planes (`plane:
+route|map`) so the two debts stay distinguishable in one merged list.
+Beware `budget_rollup` key names: `points_plan` / `points_actual` /
+`points_remaining_budget` (NOT `planned_points`) and it embeds every sector row
+— `_slim_budget` strips it. Tests: `tests/test_sitrep.py`.
+
+**Shell gotcha that bit this work:** zsh does not word-split unquoted scalars,
+so `for c in "route status"; do terra $c; done` passes ONE argv `"route
+status"` and every command silently returns empty. Use `${=c}` or an array —
+same family as the skill-sync bug in section C.
+
+
+### 20. Agent-DX fixes from the 2026-07-27 lead handbacks
+
+Five real defects, all of the same family: **the tool let an agent believe
+something false.** Tests: `tests/test_agent_dx_fixes.py` (mutation-checked).
+
+1. **A failure that reads as success.** The error envelope ends
+   `"code": "route_complete"` + closing braces, so `| tail` shows the
+   operation name and an agent reads it as done — a lead marked THREE routes
+   complete that had failed. Fix: `agent_io.emit` now prints
+   `TERRA ERROR [code]: <first line>` to **stderr** on any non-success.
+   stdout stays strictly JSON. When you add an output path, do not bypass
+   `emit`.
+2. **`route start` on an in_progress task said "waiting on None".** An
+   in_progress task carries `pickable=False`, so it fell into the deps
+   branch — meaningless for the exact stranded-lead case `--agent` documents.
+   Now an explicit RECLAIM path: reclaim when owner is None OR heartbeat
+   ≥ `HEARTBEAT_STALE_HOURS`; **refuse loudly when the owner is alive**
+   (that refusal is the double-writer interlock — keep it can-fail); a
+   same-agent restart is just a heartbeat. Stamps `reclaimed_at` /
+   `reclaimed_from`.
+3. **Probe env reads were invisible.** Declared `inputs` only cover
+   `known:`/`assumption:`; a probe reading `os.environ` consumed an input the
+   run record never mentioned, so a hand-pinned run and a bare run were
+   byte-indistinguishable and the forced one could graduate a belief. New
+   `src/terra/env_reads.py` swaps `os.environ` for a recording proxy during
+   the call and stamps `env_reads` on the run. Secret-looking keys are
+   redacted; ambient shell vars filtered; `complete: false` because
+   **subprocesses are not instrumented** — say what you cannot see rather
+   than implying coverage.
+4. **`route log` had no `--task`.** A lead hand-parsed `route.json` to read
+   one task's history — the shadow-tracker habit `route_log` exists to kill.
+   `route_log(..., task_id=)` + `--task`; unknown id raises.
+5. **`unknown get` did not exist** while `known get` does, and the
+   nearest-looking verb `unknown status` is a **SETTER**. Aliased to
+   `unknown show`.
+
+**Three of seven reported "bugs" did NOT reproduce** — the symptoms were real
+but the diagnoses were wrong. Reproduce before fixing:
+- "`known get` emits a NOTE preamble on stdout" — it is already on stderr;
+  stdout parses clean.
+- "consumer registration bumps `updated_at` and cascades staleness" —
+  isolated it; a read leaves `updated_at` untouched. Something else moved it.
+- "`sitrep --json` has non-JSON preamble" — stdout was pure JSON; the real
+  fault was that `--json` was **not an accepted flag**, so argparse exited 2
+  with EMPTY stdout and the caller's `json.load` failed at char 0. Symptom
+  "corrupt JSON", cause "bad flag". **Lesson: an unrecognized flag that
+  empties stdout is indistinguishable from corrupt output — accept the
+  no-op flag when every sibling verb takes it.**
+
+**Known inconsistency deliberately NOT changed:** `unknown show/get` prints
+human text by default and JSON under `--json`; `known get` is JSON-first.
+Flipping it would break existing agent parsing. Left as-is; revisit only with
+a deprecation path.
+
+
+### 21. Run provenance: a run must say what it was computed against
+
+`readings.record_reads(sink)` + `known_reads` on the run record (mirrors
+`env_reads`, §20.3). Declared probe `inputs` only cover explicit
+`known:`/`assumption:` bindings; **most probes declare none** and call
+`read_known()` from inside their own code, so the record never said which
+beliefs produced the number. Screening ~6,000 orphaned runs by design-of-record
+basis was therefore only possible by bucketing on timestamp — the tech lead
+named this a *prerequisite enabler* before any mass-linking campaign.
+
+Each row: `known_id`, `map`, `value`, `confidence`, **`as_of`**, plus
+`stale`/`inherited`/`conditional`/`superseded` flags when set. `as_of` is the
+screening field — a value alone cannot tell you which design era produced it.
+
+Design notes:
+- The record lookup for `as_of` runs **only when a sink is active** (inside a
+  probe run), so ordinary CLI/consumer reads pay nothing.
+- `_note_read` swallows every exception: **provenance must never break a
+  measurement.**
+- Dedupes per `(known_id, map)` — a probe reading the same belief in a loop
+  records one row.
+- **`--dry-run` returns before the stamp block**, so dry runs show neither
+  `known_reads` nor `env_reads`. Verify with a real run; the tests do.
+
+### 22. Reported DX bugs need REPRODUCING — 4 of 9 did not exist
+
+Running total from the 2026-07-27 handbacks. Real: error-envelope silence,
+`route start` "waiting on None", env-read invisibility, `route log --task`,
+`unknown get`, `sitrep --json`, gate-counts-superseded, missing run provenance.
+**Not reproducible:** `known get` NOTE on stdout (already stderr), consumer
+registration cascading staleness (isolated — a read leaves `updated_at`
+untouched), `sitrep` JSON preamble (real cause: unaccepted flag → argparse
+rc=2 → EMPTY stdout), **`known show --json`** (it has existed all along).
+
+The recurring shape is an agent inferring a cause from a symptom and reporting
+the cause as fact. Reproduce first; a "fix" to a non-bug adds surface and hides
+the real defect. The `unqualified_scalar_source_audit` case is the sharpest:
+the PM (me) called its `rules.py` dep a mis-pinned lint dep and told a lead to
+unpin it — the lead checked the probe, found it `importlib`s `rules.py` by path
+and executes its detectors, and **correctly refused**. The dep is real; the
+"fix" would have deleted a live alarm.
+
+### 23. Probe validation stamps: run refuses an unvalidated instrument
+
+`src/terra/probe_stamp.py`. `validate_probe_dir` now writes
+`<probe>/.validation.json` = {ok, level, source_sha256, validated_at,
+terra_version, blocks, warnings}. `run_probe` calls `ensure_validated(pdir)`
+BEFORE loading the module: hash matches a passing stamp → run; missing / stale
+/ last-failed → revalidate inline, PASS proceeds (CLI prints a stderr NOTE),
+FAIL raises with the blocks and **stamps no run**. Provenance lands on the run
+record as `validation` {state, revalidated, source_sha256, validated_at}.
+
+Design points that matter:
+- Hash covers `probe.json` + every `*.py` in the package (recursive, minus
+  `__pycache__`) + `requirements.txt`. **probe.json is in the set** — entry,
+  kind, duration, and inputs change what the instrument is, not just its code.
+- The stamp file is deliberately NOT hashed (it lives in the package so it
+  travels with the probe; hashing it would self-stale on every write).
+- `write_probe_stamp` swallows `OSError` — a read-only probe dir must not
+  break validation itself; the missing stamp just means run revalidates.
+- **This is a real behavior change for existing probes.** Level-1 declaration
+  checks (`REQUIRED_EXPORTS`, `KIND`/`DURATION_S`) were previously enforced
+  only by `probe validate`, never by `probe run` — 15 test fixtures wrote
+  probes that ran fine and could never have validated. They were fixed, not
+  exempted. Expect the same in live projects: the first run after upgrading
+  reports the debt.
+- Map lib (`.terra/map/lib/`) is NOT in the hash — a helper edit does not
+  stale probe stamps. Deliberate scope, but it is a hole; revisit if lib
+  churn starts producing surprises.
+Tests: `tests/test_probe_stamp.py`.
+
 ---
 
 ## Layout (mental model)
