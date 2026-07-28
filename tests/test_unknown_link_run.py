@@ -83,6 +83,9 @@ def test_link_run_to_resolved_unknown_warns(tmp_path, monkeypatch, capsys):
     init_probe(tmp_path, "p", purpose="p")
     pdir = tmp_path / ".terra" / "map" / "probes" / "p"
     (pdir / "probe.py").write_text(
+        "REQUIRED_EXPORTS = ['to', 'status', 'artifacts']\n"
+        "KIND = 'watch'\n"
+        "DURATION_S = 0\n"
         "def run(ctx=None):\n"
         "    ctx = ctx or {}\n"
         "    to = ctx.get('to') or {'kind': 'default'}\n"

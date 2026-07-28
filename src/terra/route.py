@@ -528,6 +528,46 @@ def start_task(
 ) -> dict[str, Any]:
     rec = load_route(project_root)
     t = _get_task(rec, task_id)
+
+    # RECLAIM path. An in_progress task carries pickable=False, so without
+    # this it fell through to the deps branch and reported "waiting on None"
+    # — a meaningless message for the exact case `--agent` is documented to
+    # serve ("attributes a stranded lead"). Reclaiming a DEAD owner must
+    # work; stealing a LIVE one must not — two writers on one task is how the
+    # master model got corrupted.
+    if t.get("status") == "in_progress":
+        from datetime import datetime, timezone
+
+        owner = t.get("owner_agent")
+        hb = _parse_iso(t.get("last_heartbeat_at"))
+        hours = (
+            None
+            if hb is None
+            else (datetime.now(timezone.utc) - hb).total_seconds() / 3600.0
+        )
+        claimant = (agent or "").strip()
+        same = bool(claimant) and claimant == str(owner or "").strip()
+        stranded = owner is None or hours is None or hours >= HEARTBEAT_STALE_HOURS
+        if not (same or stranded):
+            raise ValueError(
+                f"task {task_id} is in_progress and ALIVE — owner {owner!r} "
+                f"heartbeated {hours:.1f}h ago (stale at "
+                f"{HEARTBEAT_STALE_HOURS}h). Refusing to reassign: two "
+                "writers on one task is how the master model got corrupted. "
+                "Verify the owner is really gone, then retry."
+            )
+        now = _now()
+        for task in rec["tasks"]:
+            if task.get("id") == task_id:
+                task["owner_agent"] = claimant or owner
+                task["last_heartbeat_at"] = now
+                task.setdefault("started_at", now)
+                if not same:
+                    task["reclaimed_at"] = now
+                    task["reclaimed_from"] = owner
+        save_route(project_root, rec)
+        return _get_task(load_route(project_root), task_id)
+
     if t.get("pickable") is False or t.get("waiting_on"):
         raise ValueError(
             f"task {task_id} waiting on {t.get('waiting_on')}"
@@ -1217,6 +1257,7 @@ def route_log(
     project_root: Path,
     *,
     limit: int = 0,
+    task_id: str | None = None,
 ) -> dict[str, Any]:
     """Chronological history of what happened, with evidence.
 
@@ -1227,7 +1268,18 @@ def route_log(
     """
     rec = load_route(project_root)
     events: list[dict[str, Any]] = []
-    for t in rec.get("tasks") or []:
+    # One route's history. Without this a lead wanting the story of a single
+    # task had to parse .terra/route.json by hand — which is exactly the
+    # shadow-tracker behaviour route_log exists to remove.
+    if task_id:
+        known_ids = {t.get("id") for t in (rec.get("tasks") or [])}
+        if task_id not in known_ids:
+            raise ValueError(f"task not found: {task_id}")
+    for t in [
+        t
+        for t in (rec.get("tasks") or [])
+        if not task_id or t.get("id") == task_id
+    ]:
         base = {
             "task": t.get("id"),
             "title": t.get("title"),

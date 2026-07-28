@@ -84,6 +84,32 @@ def _collect_map_violations(
         rec = k.get("record") or {}
         kid = rec.get("id") or k.get("id")
         n = (rec.get("stats") or {}).get("n") or 0
+
+        # A RETIRED belief is not debt — it is a belief you deliberately took
+        # out of service, and its violations were the reason you retired it.
+        # Without this, superseding a mis-wired gate could not clear its own
+        # `known_formula_failed`; only DELETING it could, which destroys the
+        # history that makes the retirement auditable. That is a perverse
+        # incentive: the gate would push agents to erase evidence of a mistake
+        # instead of recording it. `map_status` already short-circuits these
+        # (RETIRED_STATUSES → `known_retired`, info); gate must agree, or the
+        # two instruments disagree about the same record.
+        from .number_type import RETIRED_STATUSES
+
+        if rec.get("status") in RETIRED_STATUSES:
+            notices.append(
+                {
+                    "kind": "known_retired",
+                    "id": kid,
+                    "map_id": map_id,
+                    "why": (
+                        f"known {kid} is {rec.get('status')} — retired belief "
+                        "kept as history; excluded from gate debt"
+                    ),
+                }
+            )
+            continue
+
         from .run_inputs import record_input_state
 
         evidence_inputs = record_input_state(project_root, rec)

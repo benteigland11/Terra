@@ -31,6 +31,9 @@ def _write_measure_probe(root: Path, probe_id: str, *, quantity: str, value: flo
         "from pathlib import Path\n"
         f"Q = {quantity!r}\n"
         f"V = {value!r}\n"
+        "REQUIRED_EXPORTS = ['to', 'status', 'artifacts']\n"
+        "KIND = 'watch'\n"
+        "DURATION_S = 0\n"
         "def run(ctx=None):\n"
         "    ctx = ctx or {}\n"
         "    to = ctx.get('to') or {'kind': 'default'}\n"
@@ -109,6 +112,9 @@ def test_probe_reading_known_records_probe_consumer(tmp_path, monkeypatch):
     init_probe(tmp_path, "reader", purpose="derives from mtow")
     pdir = tmp_path / ".terra" / "map" / "probes" / "reader"
     (pdir / "probe.py").write_text(
+        "REQUIRED_EXPORTS = ['to', 'status', 'artifacts']\n"
+        "KIND = 'watch'\n"
+        "DURATION_S = 0\n"
         "def run(ctx=None):\n"
         "    ctx = ctx or {}\n"
         "    to = ctx.get('to') or {'kind': 'default'}\n"

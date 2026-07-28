@@ -60,6 +60,71 @@ def consumer_scope(consumer: str):
         _CURRENT_CONSUMER = prev
 
 
+# --- run-level read provenance -------------------------------------------
+# Declared probe `inputs` only cover explicit known:/assumption: bindings, and
+# most probes declare none — they call read_known() from inside their own
+# code. The run record therefore never said WHICH beliefs a measurement was
+# computed against, so screening orphaned runs by design-of-record basis was
+# only possible by bucketing on timestamp. Capturing the reads makes a run
+# self-describing: "this number was produced against mtow_final=11986.5 as of
+# 2026-07-24". That is the prerequisite for auditing the ~6,000 unattached
+# runs without re-running any of them.
+_READ_SINK: list[dict[str, Any]] | None = None
+
+
+@contextmanager
+def record_reads(sink: list[dict[str, Any]]):
+    """Collect every known read inside the block. Restores unconditionally."""
+    global _READ_SINK
+    prev = _READ_SINK
+    _READ_SINK = sink
+    try:
+        yield
+    finally:
+        _READ_SINK = prev
+
+
+def _note_read(
+    project_root: Path, known_id: str, owner: str, reading: dict[str, Any]
+) -> None:
+    """Append one read to the active sink. Never raises into the caller.
+
+    The record lookup happens ONLY when a sink is active (i.e. inside a probe
+    run), so ordinary CLI/consumer reads pay nothing for provenance they will
+    not use. ``as_of`` is the field that makes basis-screening possible — a
+    value alone cannot tell you which design era produced it.
+    """
+    if _READ_SINK is None:
+        return
+    try:
+        as_of = None
+        try:
+            from .knowns import load_known
+            from .paths import scoped_map
+
+            with scoped_map(owner):
+                as_of = (load_known(project_root, known_id) or {}).get(
+                    "updated_at"
+                )
+        except Exception:
+            as_of = None
+        row = {
+            "known_id": known_id,
+            "map": owner,
+            "value": reading.get("value", reading.get("mean")),
+            "confidence": reading.get("confidence"),
+            "as_of": as_of,
+        }
+        for flag in ("stale", "inherited", "conditional", "superseded"):
+            if reading.get(flag):
+                row[flag] = True
+        if not any(r.get("known_id") == known_id and r.get("map") == owner
+                   for r in _READ_SINK):
+            _READ_SINK.append(row)
+    except Exception:  # provenance must never break a measurement
+        pass
+
+
 def resolve_consumer(explicit: str | None = None) -> str:
     if explicit and explicit.strip():
         return explicit.strip()
@@ -181,6 +246,7 @@ def read_known(
     reading["map"] = owner
     if owner != active:
         reading["inherited"] = True
+    _note_read(project_root, known_id, owner, reading)
     return reading
 
 

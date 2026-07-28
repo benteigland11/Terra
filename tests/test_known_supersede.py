@@ -145,3 +145,53 @@ def test_map_status_flags_retired_as_info_not_debt(proj):
         if a.get("id") == "sm" and a.get("kind") != "known_retired"
     ]
     assert not noisy
+
+
+def test_gate_excludes_retired_knowns_from_debt(tmp_path: Path, monkeypatch):
+    """Retiring a mis-wired gate must CLEAR its violation.
+
+    Otherwise the only way to green the gate is `known delete`, which destroys
+    the audit trail — the gate would reward erasing a mistake over recording
+    it. Real case 2026-07-27: a tautologically-false flutter formula was
+    correctly superseded with a full reason and `terra gate` kept counting it.
+    """
+    monkeypatch.chdir(tmp_path)
+    from terra.gate import check_gate
+    from terra.knowns import create_known, link_run_known
+    from terra.probe_run import run_probe
+    from test_formula_type import _write_measure_probe
+
+    init_probe(tmp_path, "p", purpose="p")
+    _write_measure_probe(tmp_path, "p", quantity="hostile_count", value=50)
+    run_ids = [
+        run_probe(tmp_path, "p", to={"kind": "region", "id": str(i)}).get("id")
+        for i in range(5)
+    ]
+    create_known(
+        tmp_path,
+        "sparse",
+        claim="under 10",
+        map_type="formula",
+        expression="mean(h) <= 10",
+        vars=["h=hostile_count"],
+        run_id=run_ids[0],
+    )
+    for rid in run_ids[1:]:
+        link_run_known(tmp_path, "sparse", rid)
+
+    before = check_gate(tmp_path)
+    assert any(
+        v["kind"] == "known_formula_failed" and v["id"] == "sparse"
+        for v in before["violations"]
+    ), "precondition: the failing formula must be a violation"
+
+    supersede_known(tmp_path, "sparse", reason="mis-wired gate, tautological")
+
+    after = check_gate(tmp_path)
+    assert not any(
+        v["id"] == "sparse" for v in after["violations"]
+    ), "a retired belief must not remain gate debt"
+    assert any(
+        n["kind"] == "known_retired" and n["id"] == "sparse"
+        for n in after["notices"]
+    ), "it must still be VISIBLE as a notice — retired, not vanished"

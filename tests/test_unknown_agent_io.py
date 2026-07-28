@@ -18,11 +18,17 @@ def _payload(capsys) -> dict:
     return payload
 
 
-def _write_boolean_probe(root: Path, *, initialize: bool = True) -> None:
+def _write_boolean_probe(
+    root: Path, *, initialize: bool = True, kind: str = "watch"
+) -> None:
     if initialize:
         init_probe(root, "truth", purpose="controlled true reading")
     probe = root / ".terra" / "map" / "probes" / "truth" / "probe.py"
     probe.write_text(
+        "REQUIRED_EXPORTS = ['to', 'status', 'artifacts']\n"
+        f"KIND = {kind!r}\n"
+        + ("DURATION_S = 0\n" if kind == "watch" else "")
+        +
         "def run(ctx=None):\n"
         "    ctx = ctx or {}\n"
         "    to = ctx.get('to') or {'kind': 'literal'}\n"
@@ -110,7 +116,7 @@ def test_core_evidence_workflow_defaults_to_agent_envelopes(
     ]) == 0
     _payload(capsys)
 
-    _write_boolean_probe(tmp_path, initialize=False)
+    _write_boolean_probe(tmp_path, initialize=False, kind="run")
     run_id = run_probe(tmp_path, "truth", to={"kind": "literal"})["id"]
     assert main(["unknown", "link-run", "truth", run_id]) == 0
     _payload(capsys)

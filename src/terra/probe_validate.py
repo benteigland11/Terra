@@ -451,7 +451,20 @@ def validate_probe_dir(probe_path: Path) -> dict[str, Any]:
         meta = dict(meta)
         meta["_kind_info"] = kind_info
 
-    return _result(
+    # Stamp the outcome against the current package hash so `probe run` can
+    # tell a validated instrument from an edited one.
+    from .probe_stamp import write_probe_stamp
+
+    stamp = write_probe_stamp(
+        probe_path,
+        ok=len(blocks) == 0,
+        probe_id=pid if isinstance(pid, str) else dir_name,
+        level=VALIDATION_LEVEL,
+        blocks=blocks,
+        warnings=warnings,
+    )
+
+    result = _result(
         ok=len(blocks) == 0,
         probe_id=pid if isinstance(pid, str) else dir_name,
         path=probe_path,
@@ -460,6 +473,12 @@ def validate_probe_dir(probe_path: Path) -> dict[str, Any]:
         meta=meta,
         exercise=exercise,
     )
+    result["stamp"] = {
+        "source_sha256": stamp.get("source_sha256"),
+        "validated_at": stamp.get("validated_at"),
+        "ok": stamp.get("ok"),
+    }
+    return result
 
 
 def validate_probe_script(

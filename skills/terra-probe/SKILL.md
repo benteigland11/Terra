@@ -137,6 +137,18 @@ Shared helpers: put modules in `.terra/map/lib/` (on `sys.path` during validate/
 terra probe validate <probe_id>
 ```
 
+A passing validate writes a **validation stamp** (`.validation.json` inside the
+probe package) holding the sha256 of `probe.json` + every `*.py` +
+`requirements.txt`. `terra probe run` compares the live hash against it:
+
+- hash matches a passing stamp → run proceeds (`validation.state=valid`)
+- stamp missing / hash changed / last validation failed → Terra **re-validates
+  first**; PASS → run proceeds and the stamp refreshes (NOTE on stderr),
+  FAIL → **error, no run stamped**
+
+So an edited probe can never quietly produce evidence. The stamp is recorded on
+the run record under `validation`, alongside `probe_source_sha256`.
+
 5. **Run** (stamp evidence — pick active map if experiment; **terra-scopes**):
 
 ```bash
