@@ -19,10 +19,14 @@ Claims need map evidence → **terra-survey** (+ **terra-probe** for instruments
 
 ## Lead loop
 
+**Open with `terra sitrep`** — ONE call for brief + route + budget + map +
+gate, instead of the four separate reads agents used to start with. On a large
+program that is 3.6 MB → 4.8 KB of output and four turns saved. See **Shell
+economics** below for why turns, not bytes, are the unit of cost.
+
 ```bash
-terra brief show              # still the mission? (details: terra-brief)
-terra route next              # pickable / in_progress
-terra map status              # attention (details: terra-scopes / terra-survey)
+terra sitrep --human          # mission + counts + budget + attention rollup + gate
+# default JSON to parse · --full for untruncated lists · ALWAYS exits 0
 terra route start <id> --agent <you>   # claim ownership (attributes a stranded lead)
 # do work (or subagent with task id, skill, acceptance)
 terra route heartbeat <id>    # ping during long silent work — I'm still alive
@@ -40,11 +44,37 @@ double-writer collision. If `route status` shows `task_no_heartbeat`, verify
 the owner is really gone before touching its work.
 
 ```bash
-terra route status            # counts + next + blocked
+terra route status            # counts + next + blocked (FULL task table — large)
 terra route status --human
 terra route log --human       # chronological history: completions + evidence + blocks
 terra route log --limit 20    # last N events (JSON envelope by default)
 ```
+
+## Shell economics — batch, and never `&&`
+
+An agent turn costs a re-read of its whole context (~14k–28k tokens) **whatever
+the command is**: `terra route status` costs the same turn as a CFD run. On a
+measured 11-day program, Terra-bearing turns were **26% of total token spend**
+while the commands' own output was under 4% of that. The expense is the round
+trip.
+
+```bash
+# ONE call, one turn — this is the default shape for reads/bookkeeping
+terra sitrep
+terra route log --limit 20
+terra known get cd0_cruise
+```
+
+- **Separate with `;` or newlines — never `&&`.** Terra uses nonzero exits as
+  *verdicts*: `terra gate` exits 1 whenever violations exist. An `&&` chain
+  aborts there, every later command silently never runs, and the result still
+  looks clean — you will report work you did not do. `sitrep` deliberately
+  always exits 0 so it is safe anywhere in a chain.
+- **Never `| head` a Terra command to make it fit.** That is silent truncation
+  and you cannot tell a short list from a clipped one. Prefer `sitrep`, which
+  truncates explicitly and declares what it dropped under `truncated`.
+- **Never spend a turn waiting** — no `sleep`, `true`, or `until [ -f … ]`
+  polling. A full context re-read to learn nothing.
 
 **Routes ARE the record.** Do not keep a shadow markdown log/tracker of
 what happened — `route complete --evidence/--run/--known` is the write,

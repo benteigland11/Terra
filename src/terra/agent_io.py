@@ -53,7 +53,25 @@ error = tool_error
 
 
 def emit(response: dict[str, Any]) -> int:
-    """Print agent-response JSON; return process-style exit code."""
+    """Print agent-response JSON; return process-style exit code.
+
+    On FAILURE, also write a one-line loud marker to stderr.
+
+    Why: the JSON error envelope ends with ``"code": "<operation>"`` followed
+    by closing braces, so an agent that tails the output sees
+    ``"code": "route_complete"`` — which reads as the operation having
+    succeeded. A lead marked three routes done that had actually failed this
+    way (2026-07-27). stdout stays strictly JSON so parsers are unaffected;
+    the marker goes to stderr where advisory text already lives, making the
+    failure unmissable in a combined-stream read.
+    """
+    if response.get("status") not in ("success", "ok"):
+        err = response.get("error") or {}
+        code = err.get("code") or response.get("code") or "error"
+        raw = err.get("message") or response.get("message") or ""
+        stripped = str(raw).strip()
+        first = stripped.splitlines()[0] if stripped else "(no message)"
+        print(f"TERRA ERROR [{code}]: {first}", file=sys.stderr)
     return _emit(response)
 
 
