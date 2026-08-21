@@ -72,7 +72,18 @@ class _RecordingEnviron(dict):
         self._sink = sink
         self._real = source
 
-    def _note(self, key: str) -> None:
+    def _note(self, key: Any) -> None:
+        # Keys are NOT guaranteed str. `os.environ.get(b'PATH')` is legal and
+        # os.supports_bytes_environ paths do it, so a bytes key slipped past a
+        # str-keyed filter and later exploded `sorted()` comparing str<bytes.
+        # Normalize FIRST so filtering and storage are both type-stable.
+        if isinstance(key, bytes):
+            try:
+                key = key.decode("utf-8", "replace")
+            except Exception:  # noqa: BLE001
+                return
+        elif not isinstance(key, str):
+            return
         if key in _BORING:
             return
         if key not in self._sink:
@@ -117,9 +128,25 @@ def record_env_reads(sink: dict[str, Any]) -> Iterator[None]:
 
 
 def summarize(sink: dict[str, Any]) -> dict[str, Any]:
-    """Run-record block. ``complete`` is honest about subprocess blindness."""
+    """Run-record block. ``complete`` is honest about subprocess blindness.
+
+    MUST NOT RAISE. This runs AFTER ``run()`` returns, so an exception here
+    destroys a completed measurement: the full compute is paid, no run is
+    stamped, and `terra run list` shows nothing — indistinguishable from
+    "never ran". That happened for real on 2026-07-28 and cost a 12-flight
+    sim run. Provenance is never worth a measurement.
+    """
+    try:
+        read = {str(k): v for k, v in sorted(sink.items(), key=lambda kv: str(kv[0]))}
+    except Exception as e:  # noqa: BLE001
+        return {
+            "read": {},
+            "count": len(sink),
+            "complete": False,
+            "note": f"env-read summary degraded: {type(e).__name__}: {e}",
+        }
     return {
-        "read": dict(sorted(sink.items())),
+        "read": read,
         "count": len(sink),
         "complete": False,
         "note": (

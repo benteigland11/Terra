@@ -171,6 +171,15 @@ def parse_to_arg(raw: str | None) -> Any:
     return {"kind": "literal", "value": text}
 
 
+
+def _safe_provenance(fn, label: str):
+    """Never let a provenance block raise out of a completed run."""
+    try:
+        return fn()
+    except Exception as e:  # noqa: BLE001
+        return {"degraded": f"{label} unavailable: {type(e).__name__}: {e}"}
+
+
 def run_probe(
     project_root: Path,
     probe_id: str,
@@ -213,6 +222,19 @@ def run_probe(
             raise FileNotFoundError(f"probe script missing under {pdir}")
 
     mod_name = f"terra_probe_run_{probe_id}_{uuid.uuid4().hex[:8]}"
+    # Hash the source that will ACTUALLY EXECUTE, at load time. This used to
+    # be read at the END of the run, so a long solve stamped whatever was on
+    # disk when it FINISHED -- an 18-minute solve had an 18-minute window in
+    # which a concurrent edit silently relabelled it. Observed live: an arm
+    # that started under sha 570170b0 and executed that code recorded e8016324
+    # because a peer edited the probe mid-solve. The stamp was not wrong about
+    # the FILE; it was wrong about the RUN, which is worse -- it makes two arms
+    # look like they came from different code when they did not, and vice
+    # versa. Provenance must describe what ran.
+    _executed_source_sha256 = _safe_provenance(
+        lambda: hashlib.sha256(script_path.read_bytes()).hexdigest(),
+        "probe_source_sha256",
+    )
     mod, import_err = load_probe_module(
         project_root, script_path, module_name=mod_name
     )
@@ -317,6 +339,7 @@ def run_probe(
         ),
         "to": raw.get("to"),
         "status": raw.get("status"),
+        "error": raw.get("error"),
         "artifacts": artifacts,
         "measures": raw.get("measures") if isinstance(raw.get("measures"), list) else [],
         "dry_run": bool(dry_run),
@@ -328,11 +351,44 @@ def run_probe(
         "map_id": get_active_map_id(project_root),
         "input_bindings": input_bindings,
         "inputs": input_snapshots,
-        "conditional": bool(input_assumptions),
-        "assumptions": input_assumptions,
-        "env_reads": summarize_env_reads(env_sink),
-        "known_reads": read_sink,
-        "probe_source_sha256": hashlib.sha256(script_path.read_bytes()).hexdigest(),
+        # STATIC bindings (probe.json inputs) UNION DYNAMIC reads. The
+        # instrumented reader records every assumption a probe consumes from
+        # inside its own code, but the top-level fields used to come only from
+        # the declared inputs block — and essentially no probe declares one.
+        # So a run could consume `p1_cd0_cruise_pessimistic`, record it in
+        # known_reads with conditional=true, and still stamp
+        # `conditional: false, assumptions: []` at the top level, leaving
+        # `terra gate` blind to the conditionality of every band consumer.
+        # Conditionality must propagate however the value was obtained.
+        "conditional": _safe_provenance(
+            lambda: bool(input_assumptions)
+            or any(r.get("assumption_id") for r in read_sink),
+            "conditional",
+        )
+        or bool(input_assumptions),
+        "assumptions": _safe_provenance(
+            lambda: sorted(
+                set(input_assumptions or [])
+                | {
+                    r["assumption_id"]
+                    for r in read_sink
+                    if r.get("assumption_id")
+                }
+            ),
+            "assumptions",
+        )
+        or input_assumptions,
+        # Provenance is stamped DEFENSIVELY. Both of these run after run()
+        # returns, so a raise here destroys a completed measurement — full
+        # compute paid, nothing stamped, reads as "never ran". Cost a
+        # 12-flight sim run on 2026-07-28. Never let provenance outrank the
+        # measurement, and never widen this to a bare dict access.
+        "env_reads": _safe_provenance(
+            lambda: summarize_env_reads(env_sink), "env_reads"
+        ),
+        "known_reads": _safe_provenance(lambda: list(read_sink), "known_reads"),
+        # Captured at LOAD time, not here — see the note at load_probe_module.
+        "probe_source_sha256": _executed_source_sha256,
         "validation": validation,
     }
     # Iterative solvers: probe runs the loop internally and reports the

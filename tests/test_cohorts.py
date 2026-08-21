@@ -183,7 +183,10 @@ def test_add_member(proj):
     rid = _solve(proj)
     _birth_pair(proj, rid)
     create_unknown(proj, "p_req", claim="P?", map_type="number", quantity="p_req")
-    link_run(proj, "p_req", rid)
+    # p_req's quantity is not emitted by this solve. Deliberate: this test
+    # exercises cohort RUN-SET consistency, not evidence weight, so the
+    # zero-sample link must be stated on purpose.
+    link_run(proj, "p_req", rid, allow_no_sample=True)
     graduate_unknown(proj, "p_req")
     add_member(proj, "sizing_set", "p_req")
     assert "p_req" in load_cohort(proj, "sizing_set")["members"]
@@ -210,7 +213,10 @@ def test_set_cohort_refuses_empty_or_foreign_member(proj):
     with pytest.raises(ValueError, match="at least one member"):
         set_cohort(proj, "sizing_set", members=[])
     create_unknown(proj, "p_req", claim="P?", map_type="number", quantity="p_req")
-    link_run(proj, "p_req", rid)
+    # p_req's quantity is not emitted by this solve. Deliberate: this test
+    # exercises cohort RUN-SET consistency, not evidence weight, so the
+    # zero-sample link must be stated on purpose.
+    link_run(proj, "p_req", rid, allow_no_sample=True)
     graduate_unknown(proj, "p_req")
     create_cohort(proj, "other", members=["p_req"])
     with pytest.raises(ValueError, match="already belongs"):

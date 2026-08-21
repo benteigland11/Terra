@@ -138,6 +138,35 @@ def methods_disagree(stats: dict[str, Any]) -> bool:
     return corr.get("agree") is False and corr.get("accepted") is not True
 
 
+# Above this relative spread, two "methods" reporting the same quantity are
+# very unlikely to be measuring the same proposition.
+UNJUDGED_SPREAD_REL = 0.10
+
+
+def methods_unjudged(stats: dict[str, Any]) -> bool:
+    """>=2 methods, NO tolerance declared, and they are far apart.
+
+    Terra matches evidence on the quantity NAME alone, which bites in both
+    directions. A prefix made a genuine second method invisible (methods stuck
+    at 1); and the inverse is worse — two probes emitting `n_stale` over
+    DIFFERENT denominators produced methods=2 and a reported value of 3.5, the
+    mean of 7 and 0. A number describing nothing, and completely silent,
+    because with no tolerance `agree` is None and nothing objects.
+
+    Absent a tolerance we must not CLAIM disagreement (that is what
+    methods_disagree is for), but staying quiet lets a meaningless average
+    ride. Say that agreement is unjudgeable and that the mean is averaging
+    across it.
+    """
+    corr = stats.get("corroboration") or {}
+    if (corr.get("methods") or 0) < 2:
+        return False
+    if corr.get("agree") is not None or corr.get("tolerance") is not None:
+        return False
+    rel = corr.get("spread_rel")
+    return isinstance(rel, (int, float)) and rel > UNJUDGED_SPREAD_REL
+
+
 def spread_accepted(stats: dict[str, Any]) -> bool:
     corr = stats.get("corroboration") or {}
     return corr.get("agree") is False and corr.get("accepted") is True

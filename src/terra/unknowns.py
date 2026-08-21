@@ -249,12 +249,34 @@ def _run_meta_path(project_root: Path, run_id: str) -> Path:
     return run_dir(project_root, run_id) / RUN_META_NAME
 
 
+
+def _maps_holding_run(project_root, run_id: str) -> list[str]:
+    """Which OTHER maps have this run on disk. Diagnostic only."""
+    from .paths import list_maps, get_active_map_id, runs_root, scoped_map
+
+    here = get_active_map_id(project_root)
+    found: list[str] = []
+    for m in list_maps(project_root):
+        mid = m.get("id")
+        if not mid or mid == here:
+            continue
+        with scoped_map(mid):
+            if (runs_root(project_root) / run_id / RUN_META_NAME).is_file():
+                found.append(str(mid))
+    return found
+
+
+class LinkAddedNoSample(ValueError):
+    """A linked run contributed zero samples — the evidence is inert."""
+
+
 def link_run(
     project_root: Path,
     unknown_id: str,
     run_id: str,
     *,
     primary: bool = False,
+    allow_no_sample: bool = False,
 ) -> dict[str, Any]:
     """Attach a stamped run as structured evidence. Idempotent on run_id."""
     if not isinstance(run_id, str) or not run_id.strip():
@@ -269,8 +291,25 @@ def link_run(
         if visible is not None:
             meta_path = visible[0] / RUN_META_NAME
     if not meta_path.is_file():
+        # Runs are map-LOCAL by design (maps stay self-contained; adopt COPIES
+        # run dirs rather than referencing across). But a bare "run not found"
+        # sent agents hunting for a typo when the run existed on a SIBLING map
+        # — it cost a lead a whole extra dispatch to re-stamp a sweep it
+        # already had. Name the map that holds it, and the way across.
+        hint = ""
+        try:
+            elsewhere = _maps_holding_run(project_root, run_id)
+            if elsewhere:
+                hint = (
+                    f"\n  it EXISTS on: {', '.join(elsewhere)} — runs are "
+                    "map-local by design, so you cannot link across maps.\n"
+                    "  re-run the probe on THIS map, or promote the belief "
+                    "with `terra known adopt` (which copies the run dirs)."
+                )
+        except Exception:  # noqa: BLE001 — a hint must never mask the error
+            hint = ""
         raise FileNotFoundError(
-            f"run not found: {run_id} (expected {meta_path})"
+            f"run not found: {run_id} (expected {meta_path}){hint}"
         )
     try:
         _meta_chk = json.loads(meta_path.read_text(encoding="utf-8"))
@@ -314,11 +353,130 @@ def link_run(
     except (json.JSONDecodeError, OSError):
         pass
     if rec.get("type") in MAP_TYPES:
+        before_n = ((rec.get("stats") or {}).get("n")) or 0
         rec = recompute_typed_node(
             rec, project_root=project_root, run_dir_fn=run_dir
         )
+        after_n = ((rec.get("stats") or {}).get("n")) or 0
+        # A link that adds NO sample is the worst kind of success: the run is
+        # attached, the command reports OK, and n stays 0 — so the evidence
+        # carries zero weight and nobody finds out until a downstream `known
+        # get` refuses it. Five real FlightGear sessions were silently worth
+        # nothing this way (2026-07-28) because the probe emitted
+        # `elev_bias_refusal_fires_at_runtime` while the unknown declared
+        # `elev_bias_refusal_observed_at_runtime`. Same proposition, different
+        # spelling, zero evidence. Say so at link time, loudly.
+        if after_n == before_n and not allow_no_sample:
+            # This was a stderr NOTE from 2026-07-28. It kept being missed:
+            # by 2026-08-08 the SAME defect had silently voided evidence at
+            # least three more times in one day (canon empennage presence,
+            # the D9 washout trade verdict, the tmp-path-literals sweep) —
+            # each time the link "succeeded", n stayed 0, and the finding
+            # could not graduate despite good evidence behind it. A warning
+            # that has failed this often is not a warning, it is decoration.
+            # REFUSE, and make the caller say `--allow-no-sample` on purpose.
+            _warn_link_added_no_sample(project_root, rec, run_id)
+            raise LinkAddedNoSample(
+                _no_sample_message(project_root, rec, run_id)
+            )
     save_unknown(project_root, rec)
     return rec
+
+
+def _no_sample_message(
+    project_root: Path, rec: dict[str, Any], run_id: str
+) -> str:
+    want = rec.get("quantity")
+    emitted: list[str] = []
+    try:
+        meta_path = _run_meta_path(project_root, run_id)
+        if meta_path.is_file():
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            emitted = sorted(
+                {
+                    str(m.get("quantity"))
+                    for m in (meta.get("measures") or [])
+                    if isinstance(m, dict) and m.get("quantity")
+                }
+            )
+    except Exception:  # noqa: BLE001
+        pass
+    lines = [
+        f"run {run_id} added NO sample to {rec.get('id')!r} — the link would "
+        f"attach evidence worth nothing (n stays "
+        f"{((rec.get('stats') or {}).get('n')) or 0}).",
+        f"  this node declares quantity: {want!r}",
+    ]
+    if emitted:
+        lines.append(
+            "  the run emitted: " + ", ".join(repr(q) for q in emitted[:8])
+            + (" …" if len(emitted) > 8 else "")
+        )
+        if want and want not in emitted:
+            lines.append(
+                "  NAME MISMATCH — same proposition, different spelling reads "
+                "as no evidence at all. Name the PROPOSITION, not the "
+                "instrument, and agree the quantity before the run."
+            )
+    else:
+        lines.append(
+            "  the run emitted no measures at all (status=error runs carry "
+            "none and are structurally uncountable)."
+        )
+    lines.append(
+        "  Fix the quantity name (or the probe), then re-link. To attach it "
+        "anyway as provenance-only, pass --allow-no-sample."
+    )
+    return "\n".join(lines)
+
+
+def _warn_link_added_no_sample(
+    project_root: Path, rec: dict[str, Any], run_id: str
+) -> None:
+    """stderr NOTE when a linked run contributes no sample. Never raises."""
+    import sys as _sys
+
+    try:
+        want = rec.get("quantity")
+        emitted: list[str] = []
+        meta_path = _run_meta_path(project_root, run_id)
+        if meta_path.is_file():
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            emitted = sorted(
+                {
+                    str(m.get("quantity"))
+                    for m in (meta.get("measures") or [])
+                    if isinstance(m, dict) and m.get("quantity")
+                }
+            )
+        print(
+            f"NOTE: run {run_id} linked to {rec.get('id')} but added NO sample "
+            f"(n is still {((rec.get('stats') or {}).get('n')) or 0}). This "
+            "evidence currently carries ZERO weight.",
+            file=_sys.stderr,
+        )
+        if want:
+            print(f"    this node declares quantity: {want!r}", file=_sys.stderr)
+        if emitted:
+            print(
+                f"    the run emitted: {', '.join(repr(q) for q in emitted[:8])}"
+                + (" …" if len(emitted) > 8 else ""),
+                file=_sys.stderr,
+            )
+            if want and want not in emitted:
+                print(
+                    "    NAME MISMATCH — same proposition, different spelling "
+                    "reads as no evidence at all.",
+                    file=_sys.stderr,
+                )
+        else:
+            print(
+                "    the run emitted no measures at all (status=error runs "
+                "carry none and are structurally uncountable).",
+                file=_sys.stderr,
+            )
+    except Exception:  # noqa: BLE001 — a warning must never fail the link
+        pass
 
 
 def link_calculation(

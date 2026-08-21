@@ -682,6 +682,136 @@ def cmd_route_set_effort(args: argparse.Namespace) -> int:
     return emit(success(payload, meta={"surface": "terra.route.set_effort"}))
 
 
+def cmd_route_prioritize(args: argparse.Namespace) -> int:
+    """Re-rank tasks. Orthogonal to effort — never moves the budget."""
+    from .agent_io import emit, error, success
+    from .route import PRIORITY_MEANING, route_status, set_task_priority
+
+    try:
+        root = require_project_root()
+        changed = set_task_priority(
+            root,
+            list(args.ids or []),
+            priority=args.priority,
+            reason=getattr(args, "reason", None),
+        )
+        st = route_status(root)
+    except (FileNotFoundError, ValueError, OSError) as e:
+        return emit(error(str(e), code="route_prioritize"))
+    counts = (st.get("counts") or {}).get("by_priority_open") or {}
+    payload = {
+        "changed": changed,
+        "priority": args.priority,
+        "meaning": PRIORITY_MEANING.get(args.priority),
+        "by_priority_open": counts,
+    }
+    if args.human:
+        for t in changed:
+            print(f"{t.get('id')} → {t.get('priority')}  {t.get('title')}")
+        print(f"open by priority: {counts}")
+        return 0
+    return emit(success(payload, meta={"surface": "terra.route.prioritize"}))
+
+
+def cmd_brief_phase_close(args: argparse.Namespace) -> int:
+    """Declare a phase closed/re-opened. Authority act, not a count."""
+    from .agent_io import emit, error, success
+    from .brief import brief_summary, close_phase
+
+    try:
+        root = require_project_root()
+        rec = close_phase(
+            root, args.id, reason=args.reason, reopen=bool(args.reopen)
+        )
+    except (FileNotFoundError, ValueError, OSError) as e:
+        return emit(error(str(e), code="brief_phase_close"))
+    from .route import route_status
+
+    try:
+        st = route_status(root)
+        roll = st.get("phases") or {}
+        warn = [a for a in (st.get("attention") or [])
+                if a.get("kind") == "phase_closed_with_open_work"
+                and a.get("id") == args.id]
+    except Exception:  # noqa: BLE001
+        roll, warn = {}, []
+    if warn:
+        print(f"NOTE: {warn[0]['why']}", file=sys.stderr)
+    payload = {
+        "phases": brief_summary(rec).get("phases"),
+        "current": roll.get("current"),
+        "warning": warn[0] if warn else None,
+    }
+    if args.human:
+        state = "re-opened" if args.reopen else "CLOSED"
+        print(f"phase {args.id} {state} — current phase now: {roll.get('current')}")
+        return 0
+    return emit(success(payload, meta={"surface": "terra.brief.phase_close"}))
+
+
+def cmd_route_rephase(args: argparse.Namespace) -> int:
+    """Move tasks between lifecycle phases."""
+    from .agent_io import emit, error, success
+    from .route import route_status, set_task_phase
+
+    try:
+        root = require_project_root()
+        changed = set_task_phase(
+            root, list(args.ids or []), phase=args.phase,
+            reason=getattr(args, "reason", None),
+        )
+        st = route_status(root)
+    except (FileNotFoundError, ValueError, OSError) as e:
+        return emit(error(str(e), code="route_rephase"))
+    payload = {"changed": [t.get("id") for t in changed],
+               "phase": args.phase, "phases": st.get("phases")}
+    if args.human:
+        print(f"re-phased {len(changed)} task(s) -> {args.phase}")
+        return 0
+    return emit(success(payload, meta={"surface": "terra.route.rephase"}))
+
+
+def cmd_route_phases(args: argparse.Namespace) -> int:
+    """Lifecycle view: where are we, and can we exit the current phase?"""
+    from .agent_io import emit, error, success
+    from .route import route_status
+
+    try:
+        root = require_project_root()
+        st = route_status(root)
+    except (FileNotFoundError, ValueError, OSError) as e:
+        return emit(error(str(e), code="route_phases"))
+    roll = st.get("phases") or {}
+    if args.human:
+        if not roll.get("declared"):
+            print("(no phases declared — terra brief phase <id> --title \"…\")")
+        print(f"current phase: {roll.get('current') or '(all declared phases exited)'}")
+        hdr = (
+            f"{'phase':<24}{'open':>6}{'done':>6}{'canc':>6}"
+            f"{'blkd':>6}{'dead':>6}{'pts':>7}  exit"
+        )
+        print(hdr)
+        print("-" * len(hdr))
+        for r in roll.get("phases") or []:
+            if r["closed"]:
+                mark = "CLOSED" if not r["open"] else f"CLOSED (!{r['open']} OPEN)"
+            else:
+                mark = "ready" if r["exit_ready"] else f"{r['exit_blockers']} left"
+            if r["unreachable"]:
+                mark += f" (!{r['unreachable']} unreachable)"
+            flag = "" if r["declared"] else "  [UNDECLARED]"
+            print(
+                f"{r['id']:<24}{r['open']:>6}{r['done']:>6}{r['cancelled']:>6}"
+                f"{r['blocked']:>6}{r['unreachable']:>6}{r['points_open']:>7}"
+                f"  {mark}{flag}"
+            )
+        if roll.get("unphased_open"):
+            print(f"\n{roll['unphased_open']} open task(s) carry NO phase "
+                  f"— invisible to every phase exit criterion")
+        return 0
+    return emit(success(roll, meta={"surface": "terra.route.phases"}))
+
+
 def cmd_route_sector_add(args: argparse.Namespace) -> int:
     from .agent_io import emit, error, success
     from .route import add_sector, route_status
@@ -776,7 +906,12 @@ def cmd_route_next(args: argparse.Namespace) -> int:
 
     try:
         root = require_project_root()
-        tasks = next_tasks(root, limit=int(args.limit or 5))
+        tasks = next_tasks(
+            root,
+            limit=int(args.limit or 5),
+            priority=getattr(args, "priority", None),
+            phase=getattr(args, "phase", None),
+        )
     except (FileNotFoundError, ValueError, OSError) as e:
         return emit(error(str(e), code="route_next"))
     if args.human:
@@ -788,8 +923,8 @@ def cmd_route_next(args: argparse.Namespace) -> int:
             bkt = t.get("bucket")
             weight = f"  {bkt}/{pts}pt" if bkt or pts else ""
             print(
-                f"{t.get('id')}  [{t.get('status')}]  skill={t.get('skill')}{weight}  "
-                f"{t.get('title')}"
+                f"{t.get('id')}  [{t.get('status')}]  {t.get('priority')}  "
+                f"skill={t.get('skill')}{weight}  {t.get('title')}"
             )
         return 0
     return emit(
@@ -820,6 +955,7 @@ def cmd_route_add(args: argparse.Namespace) -> int:
             bucket=getattr(args, "bucket", None),
             points=getattr(args, "points", None),
             sector_id=getattr(args, "sector_id", None),
+            priority=getattr(args, "priority", None),
         )
     except (FileNotFoundError, ValueError, FileExistsError, OSError) as e:
         return emit(error(str(e), code="route_add"))
@@ -937,6 +1073,37 @@ def cmd_route_block(args: argparse.Namespace) -> int:
     except (FileNotFoundError, ValueError, OSError) as e:
         return emit(error(str(e), code="route_block"))
     return emit(success(t, meta={"surface": "terra.route.block"}))
+
+
+def cmd_route_cancel(args: argparse.Namespace) -> int:
+    """Retire a task that should never be worked. Not `done` — never valid."""
+    from .agent_io import emit, error, success
+    from .route import cancel_task, dependents_of
+
+    try:
+        root = require_project_root()
+        # Look BEFORE the write: cancelling strands every live dependent
+        # permanently (a cancelled dep never turns done), and until this
+        # note existed that happened in total silence.
+        stranded = dependents_of(root, args.id, live_only=True)
+        t = cancel_task(root, args.id, reason=args.reason,
+                        force=getattr(args, "force", False))
+    except (FileNotFoundError, ValueError, OSError) as e:
+        return emit(error(str(e), code="route_cancel"))
+    if stranded:
+        ids = ", ".join(str(s.get("id")) for s in stranded)
+        print(
+            f"NOTE: cancelling {args.id} STRANDS {len(stranded)} live "
+            f"task(s): {ids}\n"
+            f"      They can never become pickable — a cancelled dep never "
+            f"turns done.\n"
+            f"      Re-point each onto the live successor, or cancel it too:\n"
+            f"        terra route status   # see kind=task_dep_cancelled",
+            file=sys.stderr,
+        )
+    payload = dict(t)
+    payload["stranded_dependents"] = [s.get("id") for s in stranded]
+    return emit(success(payload, meta={"surface": "terra.route.cancel"}))
 
 
 def cmd_route_unblock(args: argparse.Namespace) -> int:
@@ -1402,6 +1569,25 @@ def cmd_unknown_show(args: argparse.Namespace) -> int:
         desc = describe_unknown(root, args.id)
     except (FileNotFoundError, OSError, json.JSONDecodeError) as e:
         print(f"error: {e}", file=sys.stderr)
+        return 1
+    except ValueError as e:
+        # A formula node whose var binds a SUPERSEDED/stale known used to
+        # raise straight out of here as an uncaught traceback. The read
+        # refusal is correct — a retired belief must not be consumed — but
+        # escaping as a traceback makes the node UNREADABLE, and an
+        # unreadable node is invisible to every CLI-based audit. So the very
+        # act of retiring a belief could silently hide the nodes that still
+        # depend on it, which is the opposite of what supersession is for.
+        # Report it as a describable defect instead.
+        print(
+            f"error: unknown {args.id!r} cannot be described — one of its "
+            f"formula vars binds a belief that refuses to be read:\n"
+            f"  {e}\n"
+            f"  This node is NOT broken data; its binding is stale. Re-point "
+            f"the var at the live successor, or read the historical value "
+            f"with --allow-superseded on the bound known.",
+            file=sys.stderr,
+        )
         return 1
     if args.json:
         print(json.dumps(desc, indent=2, sort_keys=True, default=str))
@@ -2544,7 +2730,8 @@ def cmd_unknown_link_run(args: argparse.Namespace) -> int:
     try:
         root = require_project_root()
         rec = link_run(
-            root, args.id, args.run_id, primary=bool(args.primary)
+            root, args.id, args.run_id, primary=bool(args.primary),
+            allow_no_sample=bool(getattr(args, "allow_no_sample", False)),
         )
     except (ValueError, FileNotFoundError, OSError) as e:
         return emit(error(str(e), code="unknown_link_run"))
@@ -3002,15 +3189,72 @@ def cmd_probe_run(args: argparse.Namespace) -> int:
         else:
             to = parse_to_arg(args.to)
         timeout = args.timeout if args.timeout is not None else DEFAULT_RUN_TIMEOUT_S
+
+        # --spec-file: the probe's spec travels as an ARGUMENT, not env.
+        # Probes were selecting their subject through PROBE_SPEC_JSON, which
+        # dies silently at a fresh-shell boundary (each agent tool call is a
+        # new shell; only cwd survives). A dropped override then let a probe
+        # measure the DEFAULT body and still report status=ok — that is how a
+        # gate certified canon while claiming to test a different artifact.
+        extra: dict[str, Any] = {}
+        if getattr(args, "spec_file", None):
+            spec_path = Path(args.spec_file)
+            if not spec_path.is_file():
+                raise FileNotFoundError(f"--spec-file not found: {spec_path}")
+            extra["spec"] = json.loads(spec_path.read_text(encoding="utf-8"))
+
         stamp = run_probe(
             root,
             args.id,
             to=to,
             timeout_s=float(timeout),
             dry_run=bool(args.dry_run),
+            extra_ctx=extra or None,
             strict_to=bool(getattr(args, "strict_to", False)),
             strict_status=bool(getattr(args, "strict_status", False)),
         )
+
+        # --assert-measure: a post-run gate that FAILS LOUDLY. The run is still
+        # stamped (audit trail), but the command exits nonzero and names the
+        # mismatch, so "the override silently didn't take" becomes impossible
+        # to mistake for a clean pass.
+        asserts = getattr(args, "assert_measure", None) or []
+        if asserts:
+            got = {
+                m.get("quantity"): m.get("value")
+                for m in (stamp.get("measures") or [])
+            }
+            problems: list[str] = []
+            for spec in asserts:
+                name, _, want = str(spec).partition("=")
+                name = name.strip()
+                if name not in got:
+                    problems.append(
+                        f"{name}: NOT EMITTED by this run "
+                        f"(the probe never measured it)"
+                    )
+                    continue
+                if want.strip():
+                    try:
+                        ok = float(got[name]) == float(want)
+                    except (TypeError, ValueError):
+                        ok = str(got[name]) == want.strip()
+                    if not ok:
+                        problems.append(
+                            f"{name}: expected {want.strip()}, got {got[name]!r}"
+                        )
+            if problems:
+                return emit(
+                    error(
+                        "run stamped as "
+                        f"{stamp.get('id')} but --assert-measure FAILED:\n  - "
+                        + "\n  - ".join(problems)
+                        + "\n  the reading exists; it does NOT satisfy the "
+                        "assertion you required.",
+                        code="probe_run_assert",
+                        meta={"run_id": stamp.get("id"), "failed": problems},
+                    )
+                )
     except FileNotFoundError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
@@ -3394,6 +3638,8 @@ def cmd_probe_list(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    from .route import TASK_PRIORITIES
+
     p = argparse.ArgumentParser(
         prog="terra",
         description=(
@@ -3612,6 +3858,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--strict-status",
         action="store_true",
         help="CI: fail if status is not in recommended vocab",
+    )
+    p_run.add_argument(
+        "--spec-file",
+        default=None,
+        help="JSON file whose contents become ctx['spec'] — survives the "
+        "shell boundary that silently drops env-based overrides",
+    )
+    p_run.add_argument(
+        "--assert-measure",
+        action="append",
+        default=None,
+        metavar="NAME[=VALUE]",
+        help="Fail loudly unless the run emitted NAME (optionally == VALUE). "
+        "Repeatable. Turns a silently-ignored override into a hard error.",
     )
     p_run.add_argument("--json", action="store_true")
     p_run.set_defaults(func=cmd_probe_run)
@@ -3841,6 +4101,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--primary",
         action="store_true",
         help="Set as primary_run_id (default: first link becomes primary)",
+    )
+    p_ulr.add_argument(
+        "--allow-no-sample",
+        action="store_true",
+        help="Attach a run that contributes ZERO samples (provenance only). "
+        "Refused by default: a link that adds no sample looks like success "
+        "while the evidence carries no weight.",
     )
     p_ulr.set_defaults(func=cmd_unknown_link_run)
 
@@ -4444,6 +4711,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_bs = br_sub.add_parser("show", help="Show brief (JSON default)")
     p_bs.add_argument("--human", action="store_true")
     p_bs.add_argument("--full", action="store_true", help="Include proposals")
+    # Accepted no-op: JSON is already this verb's default. Refusing the
+    # flag made argparse exit 2 with EMPTY stdout, which downstream reads
+    # as "corrupt JSON", not "bad flag" — it cost a lead several turns on
+    # `sitrep` before the same trap was found on five sibling verbs.
+    p_bs.add_argument(
+        "--json",
+        action="store_true",
+        help="Accepted no-op — JSON is already the default output",
+    )
     p_bs.set_defaults(func=cmd_brief_show)
 
     p_bset = br_sub.add_parser("set", help="Update brief fields (bumps version)")
@@ -4499,6 +4775,22 @@ def build_parser() -> argparse.ArgumentParser:
     p_bph.add_argument("id", help="Phase slug")
     p_bph.add_argument("--title", default="")
     p_bph.set_defaults(func=cmd_brief_phase)
+
+    p_bpc = br_sub.add_parser(
+        "phase-close",
+        help="Declare a phase CLOSED (or --reopen). Authority act — closure "
+        "is declared, exit-readiness is computed.",
+    )
+    p_bpc.add_argument("id", help="Declared phase id")
+    p_bpc.add_argument(
+        "--reason",
+        required=True,
+        help="On what basis — a closure with no stated basis is an "
+        "unexplained authority act",
+    )
+    p_bpc.add_argument("--reopen", action="store_true", help="Re-open instead")
+    p_bpc.add_argument("--human", action="store_true")
+    p_bpc.set_defaults(func=cmd_brief_phase_close)
 
     p_bp = br_sub.add_parser("propose", help="Queue a change (does not apply)")
     p_bp.add_argument("--summary", required=True)
@@ -4699,6 +4991,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Check one map only (default: every map — debt cannot hide)",
     )
     p_gate.add_argument("--human", action="store_true", help="Prose output")
+    # Accepted no-op: JSON is already this verb's default. Refusing the
+    # flag made argparse exit 2 with EMPTY stdout, which downstream reads
+    # as "corrupt JSON", not "bad flag" — it cost a lead several turns on
+    # `sitrep` before the same trap was found on five sibling verbs.
+    p_gate.add_argument(
+        "--json",
+        action="store_true",
+        help="Accepted no-op — JSON is already the default output",
+    )
     p_gate.set_defaults(func=cmd_gate)
 
     p_sit = sub.add_parser(
@@ -4750,6 +5051,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_rst = rt_sub.add_parser("status", help="Counts + next + blocked (JSON)")
     p_rst.add_argument("--human", action="store_true")
+    # Accepted no-op: JSON is already this verb's default. Refusing the
+    # flag made argparse exit 2 with EMPTY stdout, which downstream reads
+    # as "corrupt JSON", not "bad flag" — it cost a lead several turns on
+    # `sitrep` before the same trap was found on five sibling verbs.
+    p_rst.add_argument(
+        "--json",
+        action="store_true",
+        help="Accepted no-op — JSON is already the default output",
+    )
     p_rst.set_defaults(func=cmd_route_status)
 
     p_rlog = rt_sub.add_parser(
@@ -4767,6 +5077,15 @@ def build_parser() -> argparse.ArgumentParser:
         "exists to remove.",
     )
     p_rlog.add_argument("--human", action="store_true")
+    # Accepted no-op: JSON is already this verb's default. Refusing the
+    # flag made argparse exit 2 with EMPTY stdout, which downstream reads
+    # as "corrupt JSON", not "bad flag" — it cost a lead several turns on
+    # `sitrep` before the same trap was found on five sibling verbs.
+    p_rlog.add_argument(
+        "--json",
+        action="store_true",
+        help="Accepted no-op — JSON is already the default output",
+    )
     p_rlog.set_defaults(func=cmd_route_log)
 
     p_rbgt = rt_sub.add_parser(
@@ -4774,6 +5093,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Budget rollup only (total/planned/done/unallocated + task weights)",
     )
     p_rbgt.add_argument("--human", action="store_true")
+    # Accepted no-op: JSON is already this verb's default. Refusing the
+    # flag made argparse exit 2 with EMPTY stdout, which downstream reads
+    # as "corrupt JSON", not "bad flag" — it cost a lead several turns on
+    # `sitrep` before the same trap was found on five sibling verbs.
+    p_rbgt.add_argument(
+        "--json",
+        action="store_true",
+        help="Accepted no-op — JSON is already the default output",
+    )
     p_rbgt.set_defaults(func=cmd_route_budget)
 
     p_rse = rt_sub.add_parser(
@@ -4795,6 +5123,60 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_rse.add_argument("--human", action="store_true")
     p_rse.set_defaults(func=cmd_route_set_effort)
+
+    p_rpr = rt_sub.add_parser(
+        "prioritize",
+        help=(
+            "Re-rank tasks p0..p3 (WHICH work). Orthogonal to --bucket "
+            "(HOW MUCH effort); never moves the budget, no unlock needed."
+        ),
+    )
+    p_rpr.add_argument("ids", nargs="+", help="Task slug(s)")
+    p_rpr.add_argument(
+        "--priority",
+        required=True,
+        choices=list(TASK_PRIORITIES),
+        help=(
+            "p0=spine, cannot finish without it; p1=required this phase; "
+            "p2=normal backlog (default); p3=deferred, kept as record"
+        ),
+    )
+    p_rpr.add_argument(
+        "--reason",
+        default=None,
+        help="Recorded on the task as a priority event (route log)",
+    )
+    p_rpr.add_argument("--human", action="store_true")
+    p_rpr.add_argument(
+        "--json",
+        action="store_true",
+        help="Accepted no-op — JSON is already the default output",
+    )
+    p_rpr.set_defaults(func=cmd_route_prioritize)
+
+    p_rph = rt_sub.add_parser(
+        "phases",
+        help=(
+            "Lifecycle view: per-phase open/done/blocked/unreachable, "
+            "current phase, and exit readiness"
+        ),
+    )
+    p_rph.add_argument("--human", action="store_true")
+    p_rph.add_argument(
+        "--json",
+        action="store_true",
+        help="Accepted no-op — JSON is already the default output",
+    )
+    p_rph.set_defaults(func=cmd_route_phases)
+
+    p_rrp = rt_sub.add_parser(
+        "rephase", help="Move task(s) into a lifecycle phase"
+    )
+    p_rrp.add_argument("ids", nargs="+")
+    p_rrp.add_argument("--phase", required=True)
+    p_rrp.add_argument("--reason", default=None)
+    p_rrp.add_argument("--human", action="store_true")
+    p_rrp.set_defaults(func=cmd_route_rephase)
 
     p_rsa = rt_sub.add_parser(
         "sector-add",
@@ -4844,7 +5226,27 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_rn = rt_sub.add_parser("next", help="Next pickable / in-progress tasks")
     p_rn.add_argument("--limit", type=int, default=5)
+    p_rn.add_argument(
+        "--priority",
+        default=None,
+        choices=list(TASK_PRIORITIES),
+        help="Only tasks at this priority (default: all, sorted p0 first)",
+    )
+    p_rn.add_argument(
+        "--phase",
+        default=None,
+        help="Only tasks in this phase (default: all phases)",
+    )
     p_rn.add_argument("--human", action="store_true")
+    # Accepted no-op: JSON is already this verb's default. Refusing the
+    # flag made argparse exit 2 with EMPTY stdout, which downstream reads
+    # as "corrupt JSON", not "bad flag" — it cost a lead several turns on
+    # `sitrep` before the same trap was found on five sibling verbs.
+    p_rn.add_argument(
+        "--json",
+        action="store_true",
+        help="Accepted no-op — JSON is already the default output",
+    )
     p_rn.set_defaults(func=cmd_route_next)
 
     p_ra = rt_sub.add_parser("add", help="Add a task")
@@ -4914,6 +5316,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Acceptance criterion (repeatable)",
     )
+    p_ra.add_argument(
+        "--priority",
+        default=None,
+        choices=list(TASK_PRIORITIES),
+        help=(
+            "WHICH work (default p2). NOT effort — that is --bucket. "
+            "p0=spine; p1=this phase; p2=backlog; p3=deferred"
+        ),
+    )
     p_ra.add_argument("--map", dest="task_map", default=None)
     p_ra.set_defaults(func=cmd_route_add)
 
@@ -4977,6 +5388,26 @@ def build_parser() -> argparse.ArgumentParser:
     p_rb.add_argument("id")
     p_rb.add_argument("--reason", required=True)
     p_rb.set_defaults(func=cmd_route_block)
+
+    p_rcan = rt_sub.add_parser(
+        "cancel",
+        help="Retire a task that should never be worked (dead premise, wrong "
+        "object, superseded). NOT `done` — asserts no outcome.",
+    )
+    p_rcan.add_argument("id")
+    p_rcan.add_argument(
+        "--reason",
+        required=True,
+        help="Why it was never valid — preserved, so the next planner does "
+        "not re-derive it",
+    )
+    p_rcan.add_argument(
+        "--force",
+        action="store_true",
+        help="Cancel even while in_progress with a live heartbeat. VERIFY the "
+        "owner is actually dead first — this destroys work that may be running.",
+    )
+    p_rcan.set_defaults(func=cmd_route_cancel)
 
     p_rub = rt_sub.add_parser("unblock", help="Unblock a task")
     p_rub.add_argument("id")

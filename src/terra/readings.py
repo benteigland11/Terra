@@ -125,6 +125,36 @@ def _note_read(
         pass
 
 
+def note_assumption_read(
+    assumption_id: str, owner: str, reading: dict[str, Any]
+) -> None:
+    """Record an ASSUMPTION consumption into the active provenance sink.
+
+    Assumptions are conditional BY DEFINITION, so a run that consumes one and
+    does not say so hands every downstream belief an unconditional face. This
+    mirrors _note_read but keys on `assumption_id` and always stamps
+    `conditional: True` — there is no non-conditional assumption read.
+    """
+    if _READ_SINK is None:
+        return
+    try:
+        row = {
+            "assumption_id": assumption_id,
+            "map": owner,
+            "value": reading.get("value"),
+            "conditional": True,
+            "as_of": reading.get("updated_at"),
+            "evidence_n": reading.get("evidence_n"),
+        }
+        if not any(
+            r.get("assumption_id") == assumption_id and r.get("map") == owner
+            for r in _READ_SINK
+        ):
+            _READ_SINK.append(row)
+    except Exception:  # provenance must never break a measurement
+        pass
+
+
 def resolve_consumer(explicit: str | None = None) -> str:
     if explicit and explicit.strip():
         return explicit.strip()
@@ -390,6 +420,13 @@ def _read_known_here(
         "stats": stats,
         "stale": bool(stale_info.get("stale")),
         "stale_reasons": list(stale_info.get("reasons") or []),
+        # Deps drive staleness, so omitting them from the consumption view
+        # made `known get` report deps=None for EVERY known — indistinguishable
+        # from genuinely unwired. A CAD wiring audit run off this path would
+        # have reported all 112 beliefs blind (the real figure was 41
+        # export-pinned + 49 with no deps). Silent omission of a field the
+        # caller is auditing is a lying instrument; carry it.
+        "deps": rec.get("deps") or {},
         "corroboration": corr,
         "uncertainty": corr.get("spread"),
         "band": corr.get("band"),

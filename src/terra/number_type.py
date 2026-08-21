@@ -522,6 +522,31 @@ def recompute_typed_node(
             for pid, vals in values_by_probe.items()
         }
     stats["by_run"] = sample_runs
+
+    # DIAGNOSTIC ONLY — does not touch n, confidence, or corroboration.
+    #
+    # `n` counts RUNS, not distinct samples. A deterministic probe re-run "to
+    # be safe" produces a byte-identical reading and silently doubles the
+    # evidence count the whole confidence ladder rests on. Measured on CG-01
+    # (2026-07-28): 196 knowns carry duplicate-signature runs, 146 at `med` —
+    # e.g. dq_frame_index_clean at n=22 from THREE distinct samples, and
+    # sm_nominal_final at n=4 from four identical 8.27 readings minutes apart.
+    #
+    # Deliberately REPORTED, not corrected: recomputing `n` re-rates beliefs
+    # program-wide, and that is a decision to take with the blast radius
+    # measured, not a silent substrate change made at 3am. Surface first.
+    _sigs: list[str] = []
+    for _r in sample_runs:
+        if (_r.get("n") or 0) <= 0:
+            continue
+        try:
+            _sigs.append(json.dumps(_r.get("values"), sort_keys=True, default=str))
+        except (TypeError, ValueError):
+            _sigs.append(repr(_r.get("values")))
+    _distinct = len(set(_sigs))
+    stats["distinct_sample_signatures"] = _distinct
+    stats["duplicate_sample_runs"] = len(_sigs) - _distinct
+
     # Corroboration: the second evidence axis (independent methods agree?)
     from .corroboration import compute_corroboration
 

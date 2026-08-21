@@ -90,3 +90,47 @@ def test_map_lib_import(tmp_path: Path, monkeypatch):
         str(a.get("path", "")).endswith("out.txt") or a.get("exists")
         for a in stamp["artifacts"]
     )
+
+
+def test_run_persists_probe_reported_error_text(tmp_path: Path, monkeypatch):
+    """E4 (KDP-A) regression: a probe that self-reports status='error' with
+    an `error` string must have that LITERAL string survive into the
+    stamped run doc via the real stamp_doc construction inside run_probe
+    (src/terra/probe_run.py). Before the fix, 390 errored runs across the
+    program had `error == null` -- 100% loss of every failure diagnostic --
+    because stamp_doc's dict literal never copied `raw.get("error")`
+    forward. This exercises the REAL run_probe, not a reimplementation, and
+    asserts on the literal message, not `error is not None`.
+    """
+    monkeypatch.chdir(tmp_path)
+    pdir = init_probe(tmp_path, "self_reports_error", purpose="canfail", kind="run")
+    nonce_message = "TERRA_TEST_NONCE_e4_regression: distinctive instrument failure text"
+    (pdir / "probe.py").write_text(
+        "KIND = 'run'\n"
+        "REQUIRED_EXPORTS = ['to', 'status', 'artifacts']\n"
+        "def run(ctx=None):\n"
+        "    ctx = ctx or {}\n"
+        "    to = ctx.get('to') or {'k': 1}\n"
+        "    if ctx.get('dry_run'):\n"
+        "        return {'to': to, 'status': 'ok', 'artifacts': []}\n"
+        "    return {'to': to, 'status': 'error', "
+        f"'error': {nonce_message!r}, 'artifacts': []}}\n",
+        encoding="utf-8",
+    )
+    v = validate_probe_dir(pdir)
+    assert v["ok"] is True, v["blocks"]
+
+    stamp = run_probe(tmp_path, "self_reports_error", to={"k": 1})
+
+    # literal string, not a truthy check -- a truncated/renamed/class-name
+    # error field would still pass `error is not None` and still be a
+    # lost diagnostic.
+    assert stamp["status"] == "error"
+    assert stamp["error"] == nonce_message
+
+    # and it must actually be PERSISTED, not just present on the returned
+    # dict -- read the stamped doc back off disk, same as the map would.
+    import json
+
+    on_disk = json.loads(Path(stamp["_path"]).read_text(encoding="utf-8"))
+    assert on_disk["error"] == nonce_message

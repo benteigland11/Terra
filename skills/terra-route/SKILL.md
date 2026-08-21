@@ -92,7 +92,8 @@ terra route add <slug> --title "…" \
   [--role enabler|deliverable|survey|orchestration|any] \
   [--enabler <brief_enabler_id>] \
   [--sector <sector_id>] \       # draw from a provision
-  [--bucket low|medium|high] \   # low=3 medium=8 high=21
+  [--bucket low|medium|high] \   # low=3 medium=8 high=21  — HOW MUCH effort
+  [--priority p0|p1|p2|p3] \     # default p2             — WHICH work
   [--points 3|8|21] \
   --accept "…"
 ```
@@ -114,6 +115,79 @@ terra route add <slug> --title "…" \
 | **high** | **21** | Explore — novel / deep |
 
 Project total: `terra brief set --budget-points N` (**terra-brief**).
+
+### Phases — the lifecycle axis
+
+`--phase` is only a real instrument when the brief DECLARES phases
+(`terra brief phase <id> --title "…"`, order = lifecycle order). Then:
+
+```bash
+terra route phases --human    # per-phase open/done/blocked/unreachable + exit
+terra route next --phase design
+```
+
+- **Declared phases validate.** Once any phase exists, `route add --phase` with
+  an undeclared id is REFUSED. Projects declaring none keep free text.
+- **Exit criterion:** a phase is exit-ready when it holds >=1 task and every
+  task is `done` or `cancelled`. **An empty phase is NOT ready** — no tasks
+  means unplanned, not complete.
+- **Current phase** = first declared phase not yet exit-ready. Undeclared tags
+  are reported but never become current; a typo must not redefine where the
+  program is.
+- **Unreachable tasks block phase exit** (`phase_exit_blocked_by_unreachable`).
+  A phase of routes stranded on cancelled deps otherwise reads "almost done"
+  forever.
+- **Unphased tasks block NO phase exit and count toward no phase.** That hole is
+  reported as `tasks_unphased` — if you use phases, tag everything.
+
+### Priority (p0..p3) — orthogonal to effort
+
+Bucket says **how much effort**; priority says **which work**. They are
+different questions and a task can be any combination (a p0 can be `low`; a
+p3 can be `high`). The letters are `p0..p3` on purpose — `low|medium|high`
+already means effort, and a `--bucket high` typed when `--priority p0` was
+meant is a silent wrong-field write nothing downstream would catch.
+
+| Priority | Meaning |
+| -------- | ------- |
+| **p0** | Spine — the program cannot finish without this |
+| **p1** | Required for the current phase |
+| **p2** | Normal backlog (**default**) |
+| **p3** | Deferred — kept as record, not scheduled |
+
+```bash
+terra route prioritize <id> [<id>…] --priority p0 --reason "on the spine"
+terra route next                      # sorted p0 first
+terra route next --priority p0        # only the spine
+```
+
+Rules that matter:
+
+- **`route next` is priority-SORTED under a limit**, so low-priority work can
+  sit unseen behind a full page of p0. `route status` →
+  `counts.by_priority_open` is never truncated — that is how you learn what
+  the window hid. `sitrep --human` prints the same rollup.
+- **Re-ranking never moves the budget** — it does not touch points or the plan
+  baseline, so it works under `plan_locked` with no unlock.
+- **p3 is not cancel.** `cancel` asserts *this should never be worked* (dead
+  premise, wrong object). p3 says *real, but not now*. Reach for p3 when you
+  want a finding kept honestly on the record without it competing for
+  attention; reach for `cancel` when the premise is dead.
+- **Legacy tasks backfill to p2, never p0.** An unranked backlog silently
+  promoted to urgent would make the first sorted `next` a lie.
+- **Priority does NOT rescue an unreachable route.** If a task's dep was
+  `cancelled`, it can never become pickable — a cancelled dep never turns
+  `done` — and `route next` will not surface it at ANY priority. Check
+  `route status` for `kind=task_dep_cancelled` (the root, severity block) and
+  `kind=task_unreachable` (everything downstream, carrying `root`). Fix the
+  ROOT: re-point its dep onto the live successor, or cancel the task too if
+  its premise died with the dep. Ranking and reachability are independent
+  failures — a p0 on a dead route is silence with a label on it.
+- **Before you `cancel`, read the NOTE.** `route cancel` now names every live
+  task the cancel will strand. Cancelling is how superseded approaches get
+  retired, so the routes it strands are disproportionately the spine.
+- `--reason` lands in `route log` as a `priority` event, so a re-rank is
+  auditable and is *not* rendered as a completion.
 
 ### Sectors (provisions)
 
@@ -151,6 +225,14 @@ terra route set-effort <id> --bucket medium
 terra route unlock-plan              # WARNING — fails
 terra route unlock-plan --confirm
 ```
+
+## Concurrent leads — route.json can refuse your write
+
+Several leads drive Terra at once, so `load -> mutate -> save` can race. If
+another agent wrote `route.json` between your read and your write, the save is
+**refused** with `ConcurrentRouteWrite` rather than silently discarding their
+edit. Recovery is simply: re-read, re-apply your change, save again. Writes are
+atomic, so you will never read a half-written route file.
 
 ## Complete with hard evidence
 

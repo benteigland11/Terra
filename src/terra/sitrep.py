@@ -61,6 +61,10 @@ def _slim_task(t: dict[str, Any]) -> dict[str, Any]:
     row = {
         "id": t.get("id"),
         "title": t.get("title"),
+        # priority (WHICH work) rides beside bucket (HOW MUCH effort).
+        # sitrep is the first command of every session — a rank the
+        # orientation digest drops is a rank nobody acts on.
+        "priority": t.get("priority"),
         "bucket": t.get("bucket"),
         "points": t.get("points"),
     }
@@ -198,6 +202,9 @@ def collect_sitrep(
     from .paths import resolve_active_map
     from .route import route_status
 
+    _BRIEF_ERR: list[str] = []
+    _ROUTE_ERR: list[str] = []
+
     cap_att = None if full else MAX_ATTENTION
     cap_act = None if full else MAX_ACTIONS
     cap_next = None if full else MAX_NEXT_TASKS
@@ -223,8 +230,9 @@ def collect_sitrep(
             ],
             "open_proposals": bs.get("open_proposals", 0),
         }
-    except (ValueError, FileNotFoundError, OSError):
+    except Exception as e:  # noqa: BLE001
         brief_block = None
+        _BRIEF_ERR.append(f"{type(e).__name__}: {e}")
 
     # --- route (may be absent before `route init`) -------------------
     route_block: dict[str, Any] | None = None
@@ -238,19 +246,55 @@ def collect_sitrep(
         blk, blk_dropped = _cap(
             [_slim_task(t) for t in (rs.get("blocked") or [])], cap_blk
         )
+        # Phase lifecycle: current phase + its exit blockers. Slimmed to the
+        # current row — the full per-phase table is `route phases`.
+        ph = rs.get("phases") or {}
+        cur_id = ph.get("current")
+        cur_row = next(
+            (r for r in (ph.get("phases") or []) if r.get("id") == cur_id), None
+        )
+        phase_block = {
+            "current": cur_id,
+            "declared": ph.get("declared") or [],
+            "unphased_open": ph.get("unphased_open", 0),
+            "undeclared_used": ph.get("undeclared_used") or [],
+            "current_row": cur_row,
+        } if (ph.get("declared") or ph.get("undeclared_used")) else None
         route_block = {
             "counts": rs.get("counts"),
+            "phases": phase_block,
             "plan_locked": rs.get("plan_locked"),
             "budget": _slim_budget(rs.get("budget")),
             "next": nxt,
             "blocked": blk,
             "dropped": {"next": nxt_dropped, "blocked": blk_dropped},
         }
-    except (ValueError, FileNotFoundError, OSError):
+    except Exception as e:  # noqa: BLE001
         route_block = None
+        _ROUTE_ERR.append(f"{type(e).__name__}: {e}")
+
+    # Orientation must DEGRADE, never die. A single stale belief anywhere in
+    # the tree used to raise out of collect_status_board / check_gate and take
+    # the whole digest with it — on 2026-07-28 one stale known on a session map
+    # made `terra sitrep` unusable program-wide, which is the opposite of what
+    # a first-command-of-the-session verb is for. Each section now fails
+    # independently into `degraded`, so the parts that still work still answer.
+    degraded: list[dict[str, Any]] = []
+
+    def _try(section: str, fn):
+        try:
+            return fn()
+        except Exception as e:  # noqa: BLE001 — orientation outranks purity
+            degraded.append(
+                {"section": section, "error": f"{type(e).__name__}: {e}"}
+            )
+            return None
 
     # --- map board ---------------------------------------------------
-    board = collect_status_board(project_root, all_maps=True, map_id=map_id)
+    board = _try(
+        "maps",
+        lambda: collect_status_board(project_root, all_maps=True, map_id=map_id),
+    ) or {}
     map_attention = list(board.get("attention") or [])
     board_actions = list(board.get("next_actions") or [])
 
@@ -266,7 +310,13 @@ def collect_sitrep(
         )
 
     # --- gate --------------------------------------------------------
-    gate = check_gate(project_root)
+    gate = _try("gate", lambda: check_gate(project_root)) or {
+        "ok": None,
+        "violations": [],
+        "notices": [],
+        "counts": {},
+        "maps_checked": [],
+    }
     violations = [_slim_violation(v) for v in (gate.get("violations") or [])]
     viol_kept, viol_dropped = _cap(violations, cap_viol)
 
@@ -295,8 +345,13 @@ def collect_sitrep(
         "route": route_block,
         "maps": map_rows,
         "maps_with_attention": board.get("maps_with_attention") or [],
+        "degraded": (
+            degraded
+            + [{"section": "brief", "error": e} for e in _BRIEF_ERR]
+            + [{"section": "route", "error": e} for e in _ROUTE_ERR]
+        ),
         "gate": {
-            "ok": bool(gate.get("ok")),
+            "ok": gate.get("ok") if gate.get("ok") is None else bool(gate.get("ok")),
             "maps_checked": gate.get("maps_checked"),
             "counts": gate.get("counts") or {},
             "violations": viol_kept,
@@ -346,9 +401,36 @@ def format_sitrep_text(rep: dict[str, Any]) -> str:
                 f"in_flight={bud.get('points_remaining_work')}"
                 + ("  OVER BUDGET" if bud.get("over_budget") else "")
             )
+        ph = r.get("phases")
+        if ph:
+            row = ph.get("current_row") or {}
+            bits = [f"  phase: {ph.get('current') or '(all exited)'}"]
+            if row:
+                bits.append(
+                    f"{row.get('open', 0)} open/{row.get('done', 0)} done"
+                    + (
+                        f"  !{row['unreachable']} UNREACHABLE"
+                        if row.get("unreachable")
+                        else ""
+                    )
+                )
+            if ph.get("undeclared_used"):
+                bits.append(
+                    f"  ⚠ undeclared phase tags: {ph['undeclared_used']}"
+                )
+            if ph.get("unphased_open"):
+                bits.append(f"  {ph['unphased_open']} open task(s) unphased")
+            out.append("  ".join(bits))
+        prio = (r.get("counts") or {}).get("by_priority_open") or {}
+        if prio:
+            out.append(
+                "  priority(open): "
+                + "  ".join(f"{k}={v}" for k, v in prio.items())
+            )
         for t in r.get("next") or []:
             out.append(
-                f"    next  {t.get('id')}  [{t.get('bucket')}] {t.get('title')}"
+                f"    next  {t.get('id')}  [{t.get('priority')}/{t.get('bucket')}] "
+                f"{t.get('title')}"
             )
     else:
         out.append("  route: (not initialized)")
@@ -356,8 +438,12 @@ def format_sitrep_text(rep: dict[str, Any]) -> str:
     g = rep.get("gate") or {}
     counts = g.get("counts") or {}
     by_kind = "  ".join(f"{k}={v}" for k, v in sorted(counts.items()))
+    # A degraded gate is UNKNOWN, not FAIL — rendering "FAIL" for a verdict we
+    # could not compute is the same lying-instrument class sitrep exists to
+    # avoid, and rendering "PASS" would be worse.
+    _verdict = "UNKNOWN" if g.get("ok") is None else ("PASS" if g.get("ok") else "FAIL")
     out.append(
-        f"  gate: {'PASS' if g.get('ok') else 'FAIL'}  "
+        f"  gate: {_verdict}  "
         f"violations={sum(counts.values())}  "
         f"notices={g.get('notices', 0)}"
         + (f"\n    by kind: {by_kind}" if by_kind else "")
@@ -386,6 +472,8 @@ def format_sitrep_text(rep: dict[str, Any]) -> str:
     for a in rep.get("next_actions") or []:
         out.append(f"    do  {' '.join(a.get('argv') or [])}   # {a.get('why')}")
 
+    for d in rep.get("degraded") or []:
+        out.append(f"  ⚠ DEGRADED [{d.get('section')}]: {str(d.get('error'))[:150]}")
     tr = rep.get("truncated") or {}
     dropped = {k: v for k, v in tr.items() if k != "full" and v}
     if dropped:

@@ -117,6 +117,10 @@ def validate_brief(data: Any) -> list[str]:
             for i, ph in enumerate(data["phases"]):
                 if not isinstance(ph, dict) or not ph.get("id"):
                     blocks.append(f"phases[{i}] must have id")
+                elif ph.get("status") not in (None, "open", "closed"):
+                    blocks.append(
+                        f"phases[{i}].status must be 'open', 'closed', or null"
+                    )
     return blocks
 
 
@@ -357,8 +361,51 @@ def add_phase(
         {
             "id": phase_id,
             "title": (title or phase_id).strip(),
+            "status": "open",
         }
     )
+    rec["phases"] = phases
+    rec["version"] = int(rec.get("version") or 1) + 1
+    save_brief(project_root, rec)
+    return load_brief(project_root)
+
+
+def close_phase(
+    project_root: Path,
+    phase_id: str,
+    *,
+    reason: str,
+    reopen: bool = False,
+) -> dict[str, Any]:
+    """Declare a phase closed (or re-open it). An AUTHORITY act, not a count.
+
+    Exit-readiness is COMPUTED (all tasks done/cancelled); closure is
+    DECLARED. They are deliberately different: a gate passing is a
+    precondition, never an authorization, and the converse also holds — a
+    phase whose work was completed WITHOUT being tagged shows zero tasks and
+    would otherwise read 'unplanned' forever, jamming `current` on an empty
+    shell. That is exactly the state CG-01 was in: p2..p5 held no tasks
+    because the work predated phase tagging.
+
+    The reason is mandatory. A closure with no stated basis is the kind of
+    unexplained authority act this program has been bitten by.
+    """
+    if not reason or not str(reason).strip():
+        raise ValueError(
+            "reason required — closing a phase is a decision and must say "
+            "on what basis"
+        )
+    rec = load_brief(project_root)
+    phases = list(rec.get("phases") or [])
+    hit = next((p for p in phases if p.get("id") == phase_id), None)
+    if hit is None:
+        raise ValueError(
+            f"unknown phase {phase_id!r} — declared: "
+            f"{[p.get('id') for p in phases]}"
+        )
+    hit["status"] = "open" if reopen else "closed"
+    hit["closed_reason"] = None if reopen else reason.strip()
+    hit["closed_at"] = None if reopen else _now()
     rec["phases"] = phases
     rec["version"] = int(rec.get("version") or 1) + 1
     save_brief(project_root, rec)
