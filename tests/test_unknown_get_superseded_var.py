@@ -7,6 +7,7 @@ a belief could silently hide every node that still depends on it.
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -22,9 +23,15 @@ from terra.unknowns import create_unknown, link_run
 
 
 def _run(root: Path, *argv):
+    repo = Path(__file__).resolve().parents[1]
+    env = dict(os.environ)
+    source_paths = [str(repo), str(repo / "src")]
+    if inherited := env.get("PYTHONPATH"):
+        source_paths.append(inherited)
+    env["PYTHONPATH"] = os.pathsep.join(source_paths)
     return subprocess.run(
         [sys.executable, "-m", "terra.cli", *argv],
-        cwd=root, capture_output=True, text=True,
+        cwd=root, capture_output=True, text=True, env=env,
     )
 
 
