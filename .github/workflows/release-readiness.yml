@@ -17,7 +17,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install test and build tooling
-        run: python -m pip install --upgrade pip build pytest
+        run: python -m pip install --upgrade pip build pytest setuptools
       - name: Verify source-layout Cartograph imports
         run: PYTHONPATH=.:src python -S -c "from terra.agent_io import tool_success; assert tool_success({})['status'] == 'success'"
       - name: Test
