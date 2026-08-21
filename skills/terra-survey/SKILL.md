@@ -22,6 +22,32 @@ description: >
 Store: `.terra/map/` (active map; pin with `terra --map <id>` — **terra-scopes**).  
 Instruments: **terra-probe**. Program tasks: **terra-route**.
 
+## Same quantity name != same proposition
+
+Terra groups evidence by quantity NAME only. Two probes emitting `n_stale`
+over DIFFERENT denominators read as `methods=2` and report the MEAN of them —
+7 and 0 became 3.5, a number describing nothing. With no tolerance declared,
+`agree` is None and nothing objects.
+
+`terra gate` now emits a **`methods_unjudged`** notice when >=2 methods sit
+>10% apart with no tolerance. Fix it by declaring one
+(`terra known tolerance <id> --within X%`) — or by checking the probes measure
+the same proposition. The inverse also bites: a name prefix can make a genuine
+second method invisible, freezing `methods` at 1.
+
+## link-run REFUSES a zero-sample link
+
+If the run you link emits no measure matching the node's `quantity`, the link
+is **refused** (`LinkAddedNoSample`) — it would attach evidence carrying zero
+weight while reporting success. Usually a NAME MISMATCH: the unknown declares
+`foo`, the probe emits `foo_bool`. Same proposition, different spelling, zero
+evidence.
+
+**Name the PROPOSITION, not the instrument, and agree the quantity name BEFORE
+the run.** Fix the name (or the probe) and re-link. `--allow-no-sample`
+attaches it as provenance only — use it deliberately, not to get past the
+error.
+
 ## Laws
 
 1. Under fog: do not freehand the domain — open an **unknown**. Unknowns are

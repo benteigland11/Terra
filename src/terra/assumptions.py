@@ -70,10 +70,21 @@ def find_assumption(project_root: Path, assumption_id: str) -> tuple[dict[str, A
 
 
 def read_assumption(project_root: Path, assumption_id: str) -> dict[str, Any]:
+    """Consume an assumption. INSTRUMENTED — see the note below.
+
+    `read_known` records every read into the active provenance sink; this did
+    not, so a probe consuming an assumption produced a run stamped
+    `conditional=false, assumptions=[]` while demonstrably depending on it.
+    That defeats the entire point of an assumption: conditionality is supposed
+    to PROPAGATE into every belief derived from the run, and `terra gate` was
+    blind to it. Found live on CG-01 2026-08-08 — both mission probes consume
+    `p1_cd0_cruise_pessimistic` (proven by poisoning the fallback) and recorded
+    no assumption at all.
+    """
     rec, owner = find_assumption(project_root, assumption_id)
     stats = rec.get("stats") or {}
     observed = stats.get("mean") if rec.get("type") == "number" else stats.get("rate")
-    return {
+    reading = {
         "id": rec["id"],
         "role": "assumption",
         "type": rec.get("type"),
@@ -89,6 +100,13 @@ def read_assumption(project_root: Path, assumption_id: str) -> dict[str, Any]:
         "updated_at": rec.get("updated_at"),
         "map": owner,
     }
+    try:
+        from .readings import note_assumption_read
+
+        note_assumption_read(assumption_id, owner, reading)
+    except Exception:  # provenance must never break a measurement
+        pass
+    return reading
 
 
 def set_assumption(

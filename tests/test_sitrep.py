@@ -230,3 +230,52 @@ def test_stdout_is_strictly_json_no_preamble(project: Path) -> None:
     out = _run(project, "sitrep").stdout
     assert out.lstrip().startswith("{"), f"stdout preamble: {out[:120]!r}"
     json.loads(out)
+
+
+def test_one_stale_belief_does_not_take_down_orientation(
+    project: Path, monkeypatch
+) -> None:
+    """A stale known anywhere used to raise out of check_gate/status_board and
+    kill the WHOLE digest — `terra sitrep` was unusable program-wide on
+    2026-07-28. Orientation must DEGRADE, never die.
+    """
+    monkeypatch.chdir(project)
+    add_task(project, "a", title="A", bucket="low")
+
+    import terra.sitrep as sr
+
+    def boom(*a, **k):
+        raise ValueError("known x is STALE (known dep moved) — re-derive")
+
+    monkeypatch.setattr(sr, "collect_sitrep", sr.collect_sitrep)
+    monkeypatch.setattr("terra.gate.check_gate", boom)
+
+    rep = sr.collect_sitrep(project)
+
+    assert rep["route"] is not None, "route must still answer"
+    assert rep["brief"] is not None, "brief must still answer"
+    assert any(d["section"] == "gate" for d in rep["degraded"])
+    assert rep["gate"]["ok"] is None, "unknown verdict, not a false PASS"
+    text = sr.format_sitrep_text(rep)
+    assert "DEGRADED" in text, "the human view must SAY it is degraded"
+
+
+def test_degraded_is_empty_when_healthy(project: Path) -> None:
+    """The discriminator: a healthy program must not report degradation."""
+    add_task(project, "a", title="A", bucket="low")
+    assert collect_sitrep(project)["degraded"] == []
+
+
+def test_degraded_gate_renders_unknown_not_fail(project: Path, monkeypatch) -> None:
+    """A verdict we could not compute must not print as FAIL (or PASS)."""
+    monkeypatch.chdir(project)
+    add_task(project, "a", title="A", bucket="low")
+    import terra.sitrep as sr
+
+    monkeypatch.setattr(
+        "terra.gate.check_gate",
+        lambda *a, **k: (_ for _ in ()).throw(ValueError("stale")),
+    )
+    text = sr.format_sitrep_text(sr.collect_sitrep(project))
+    assert "gate: UNKNOWN" in text
+    assert "gate: FAIL" not in text

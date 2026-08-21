@@ -172,6 +172,28 @@ def _collect_map_violations(
                     ),
                 }
             )
+        from .corroboration import methods_unjudged
+
+        if methods_unjudged(rec.get("stats") or {}):
+            notices.append(
+                {
+                    "kind": "methods_unjudged",
+                    "id": kid,
+                    "map_id": map_id,
+                    "why": (
+                        f"known {kid}: {corr.get('methods')} methods, NO "
+                        f"tolerance declared, and they are "
+                        f"{(corr.get('spread_rel') or 0) * 100:.0f}% apart "
+                        f"(spread={corr.get('spread')!r}). Agreement cannot "
+                        f"be judged, and the reported value AVERAGES across "
+                        f"them. Either declare a tolerance "
+                        f"(terra known tolerance {kid} --within X%) or check "
+                        f"the probes measure the SAME proposition — Terra "
+                        f"matches on the quantity NAME alone, so two probes "
+                        f"over different populations look like corroboration."
+                    ),
+                }
+            )
         if corr.get("agree") is False and corr.get("accepted") is True:
             acc = rec.get("accepted_spread") or {}
             notices.append(

@@ -1,0 +1,39 @@
+name: Release readiness
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+jobs:
+  test-and-package:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install test and build tooling
+        run: python -m pip install --upgrade pip build pytest
+      - name: Test
+        run: PYTHONPATH=.:src python -m pytest -q
+      - name: Build distributions
+        run: python -m build --sdist --wheel --outdir dist
+      - name: Verify sdist can build a clean wheel
+        run: |
+          mkdir sdist-check
+          tar -xzf dist/*.tar.gz --strip-components=1 -C sdist-check
+          python -m build --wheel --no-isolation --outdir sdist-check/dist sdist-check
+      - name: Isolated wheel smoke
+        run: |
+          python -m venv smoke
+          smoke/bin/python -m pip install --no-index dist/*.whl
+          mkdir smoke-project
+          cd smoke-project
+          ../smoke/bin/terra --version
+          ../smoke/bin/terra init
+          ../smoke/bin/terra map status > status.json
+          ../smoke/bin/python -m json.tool status.json > /dev/null

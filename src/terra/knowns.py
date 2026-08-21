@@ -20,6 +20,7 @@ from .number_type import (
     CONFIDENCE_SET,
     KNOWN_STATUSES,
     MAP_TYPES,
+    RETIRED_STATUSES,
     SCALAR_TYPES,
     can_claim_confidence,
     empty_stats,
@@ -975,6 +976,22 @@ def set_known_status(
         raise ValueError(f"status must be one of {sorted(KNOWN_STATUSES)}")
     rec = load_known(project_root, known_id)
     rec["status"] = status
+
+    # Un-retiring must not leave the tombstone behind. The read path keys the
+    # refusal on `status`, so restoring `active` restores the value — but a
+    # stale `superseded` block then sits on a live belief, reading as "this was
+    # retired for <reason>" while it is being served as current. That is a
+    # record contradicting itself. Move it to `superseded_history` so the audit
+    # trail survives without masquerading as the current state.
+    # Keyed on the RESULTING state, not the transition: the invariant is that a
+    # non-retired known never carries a tombstone. Transition-keying missed
+    # records already sitting in the contradictory state (e.g. un-retired via
+    # an earlier code path), so they could never self-heal.
+    if status not in RETIRED_STATUSES and rec.get("superseded"):
+        hist = list(rec.get("superseded_history") or [])
+        hist.append({**rec.pop("superseded"), "reverted_at": _now()})
+        rec["superseded_history"] = hist
+
     if notes is not None:
         rec["notes"] = notes
     save_known(project_root, rec)
@@ -1024,7 +1041,61 @@ def supersede_known(
         "refuted": bool(refuted),
     }
     save_known(project_root, rec)
+
+    # Supersession is a LOCAL write. A copy of the same id on another map keeps
+    # its own status, so retiring a belief here can leave an identical belief
+    # standing ACTIVE elsewhere — and a child retiring its copy does nothing
+    # upward, so the PARENT keeps serving the retired value to every consumer.
+    # This left a TAILLESS airframe certified as the master OML on `global` for
+    # days after `cad` retired its own copy (2026-07-28), and did the same to
+    # `mtow_final`. Terra gave no signal either time. Warn loudly; do NOT
+    # auto-propagate — writes stay local by design, and silently retiring a
+    # belief on a map the caller never named would be worse than the bug.
+    _warn_sibling_copies(project_root, known_id)
     return load_known(project_root, known_id)
+
+
+def _warn_sibling_copies(project_root: Path, known_id: str) -> None:
+    """stderr NOTE naming every OTHER map still holding this id un-retired."""
+    import sys as _sys
+
+    try:
+        from .number_type import RETIRED_STATUSES
+        from .paths import get_active_map_id, list_maps, scoped_map
+
+        here = get_active_map_id(project_root)
+        others: list[tuple[str, str]] = []
+        for m in list_maps(project_root):
+            mid = m.get("id")
+            if not mid or mid == here:
+                continue
+            with scoped_map(mid):
+                if not known_path(project_root, known_id).is_file():
+                    continue
+                try:
+                    sib = load_known(project_root, known_id)
+                except (OSError, ValueError):
+                    continue
+            if sib.get("status") not in RETIRED_STATUSES:
+                others.append(
+                    (str(mid), f"{sib.get('status')}/{sib.get('confidence') or '?'}")
+                )
+        if others:
+            listed = ", ".join(f"{mid} ({st})" for mid, st in others)
+            print(
+                f"NOTE: {known_id} is retired HERE ({here}) but still ACTIVE "
+                f"on: {listed}. Supersession does NOT propagate — those copies "
+                "keep serving the value to their consumers.",
+                file=_sys.stderr,
+            )
+            for mid, _ in others:
+                print(
+                    f"    terra --map {mid} known supersede {known_id} "
+                    "--reason '…'",
+                    file=_sys.stderr,
+                )
+    except Exception:  # noqa: BLE001 — a warning must never fail a write
+        pass
 
 
 # Freehand --value is the agent footgun that used to look like a silent no-op

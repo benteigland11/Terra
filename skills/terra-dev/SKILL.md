@@ -732,3 +732,336 @@ Cartograph accumulates **careful bricks**. Don't pretent they're the same.
 3. User skills updated if agent procedure changed,  
 4. Skills synced to install path,  
 5. New footguns listed under **Gotchas** above.
+
+### 24. Route priority: WHICH work, orthogonal to HOW MUCH effort
+
+`TASK_PRIORITIES = ("p0","p1","p2","p3")`, `DEFAULT_PRIORITY = "p2"` in
+route.py. Added because a real program (CG-01) reached 118 open routes with
+**no ordering at all** — `next` returned 88 pickable in insertion order, so the
+four load-bearing physics gaps sat unworked for days behind cockpit-ergonomics
+and probe-hygiene routes. Effort buckets were the only dial, and effort is the
+wrong question when the failure is allocation.
+
+Design decisions worth not re-litigating:
+
+- **`p0..p3`, NOT `low|medium|high`.** Those words already mean the effort
+  bucket. `--bucket high` typed when `--priority p0` was meant is a silent
+  wrong-field write with no downstream detector. Distinct vocabulary is the
+  whole defense.
+- **Legacy backfill is `p2`, never `p0`** (`load_route`). Promoting an
+  unranked backlog to urgent would make the first priority-sorted `next` a
+  lie about what the program had decided. Test:
+  `test_legacy_task_backfills_to_default_not_urgent`.
+- **Priority never touches points / plan_points / budget**, so
+  `set_task_priority` works under `plan_locked` with no unlock. If it required
+  an unlock nobody would ever deprioritize, which defeats the feature.
+  Tests: `test_prioritize_does_not_move_budget_or_effort`,
+  `test_prioritize_works_under_plan_lock`.
+- **`next` sorts but `counts.by_priority_open` never truncates** — same
+  rollup-before-sample rule as sitrep (§19.2/19.3). A sorted window hides the
+  tail; the rollup is the declaration of what it hid. `_slim_task` carries
+  `priority` so sitrep (the first command of every session) shows it — a rank
+  the orientation digest drops is a rank nobody acts on.
+- `set_task_priority` is **atomic**: unknown id raises before any write.
+
+**Bug this surfaced in existing code:** `route_log` hardcoded
+`"kind": "complete"` for **every** evidence row, so any non-completion event
+would have been rendered in the timeline as a COMPLETION. Now
+`entry.get("kind") or "complete"` — backward-compatible (legacy rows carry no
+kind). Whenever you add a new evidence kind, check the log renderer actually
+distinguishes it.
+
+**Pre-existing flake, not caused by this work:**
+`test_agent_dx_fixes.py::test_json_flag_accepted_on_every_read_verb[argv6]`
+(map.status) fails intermittently in the full suite and passes in isolation —
+it compares two sequential CLI invocations and something time-dependent
+differs. Worth root-causing separately; do not chase it from a route change.
+
+### 25. A CANCELLED dep strands its dependents FOREVER — and used to do it silently
+
+`_recompute_ready` computes `waiting = [d for d in deps if status != "done"]`.
+A **cancelled** dep is not done, so it stays in `waiting_on` permanently: the
+dependent reads `status=ready`, `pickable=false`, `waiting_on=[dead_id]` —
+byte-indistinguishable from work that is merely queued. There was no attention
+item, no gate violation, no error.
+
+Measured on CG-01 the day this was found: **22 of 118 open routes transitively
+unreachable**, including `cfd_drag_polar_supersonic` (the program's ONLY open
+CFD route, gating two of five program gates) and `simreal_airborne_basis_freeze`
+(root of the entire 11-route flight-demo chain). The backlog looked healthy
+while every pickable item was a loose defect-fix.
+
+**Why this shape recurs:** cancellation is how you retire a superseded
+approach, so the routes most likely to have cancelled deps are exactly the ones
+downstream of work you REDIRECTED — i.e. the spine. The failure targets your
+most important work by construction.
+
+Design decisions:
+
+- **We do NOT auto-unblock.** A cancelled basis often means the dependent's
+  premise died with it; silently making it pickable is the worse lie. The
+  defect was the SILENCE, not the blocking. Make it visible, let a lead decide:
+  re-point the dep, or cancel the dependent too.
+- **Unreachability is TRANSITIVE and computed to a fixpoint.** The first cut
+  checked one hop and reported 9 where 22 were dead — a 2.4x undercount on an
+  instrument whose entire job is "what can never be worked." Roots emit
+  `task_dep_cancelled` (severity **block**) and name themselves; downstream
+  tasks emit `task_unreachable` (severity high) carrying `root` so you fix the
+  root, not the symptom. Both computed in `_recompute_ready`, never stored.
+- **Prevention at the write site:** `cmd_route_cancel` calls `dependents_of()`
+  BEFORE cancelling and prints a stderr NOTE naming every live task the cancel
+  is about to strand; the payload carries `stranded_dependents`.
+- **Priority does not rescue a dead route.** `test_p0_ranking_cannot_rescue_a_
+  dead_route` asserts `next --priority p0` still returns nothing — which is why
+  the attention item is the only thing between a dead spine and silence. Ranking
+  and reachability are independent failures; do not let one mask the other.
+
+Tests: `tests/test_route_priority.py` (transitive closure, root-vs-downstream,
+alarm clears on re-point, live-dep can-fail, `dependents_of`).
+
+### 26. Lifecycle stress: terminal-state resurrection + phases were a no-op
+
+Found by adversarially walking a whole project lifecycle
+(`tests/test_route_lifecycle.py`), asking at every verb: *can this silently do
+nothing, or report something untrue?* Ten candidates, six real.
+
+**A. Terminal states were re-openable.** `done` and `cancelled` each assert a
+settled outcome that later records hang off. All of these silently succeeded:
+`cancelled --complete--> done` (launders a dead premise into a completion,
+which `route_log` then renders as a genuine completion event),
+`cancelled --unblock--> ready` (dead work straight back into the pickable
+queue), `cancelled --block-->`, `done --block-->`, and re-`complete` on done
+(appends a SECOND evidence block as if the work happened twice).
+
+The rule already existed — `cancel_task` refused on `done` with "would erase
+its evidence; supersede instead" — **in exactly one place, never generalised**.
+Now `TERMINAL_STATUSES` + `_refuse_if_terminal(task, verb)` guards every
+state-changing verb, and the error names the legitimate escape (supersede the
+belief / add a NEW task). The one pre-existing test asserting the old message
+was updated; behaviour is unchanged there, which is the confirmation the
+generalisation absorbed it correctly.
+
+**Deliberate non-defect:** `blocked --complete--> done` is ALLOWED and pinned by
+`test_blocked_can_still_complete`. A blocker is often resolved by the work
+itself; refusing would be over-reach. Do not "fix" it.
+
+**B. `cancel` bypassed the double-writer interlock.** `start_task` refuses to
+touch a task whose owner is alive; `cancel` destroyed live claimed work with no
+check at all — same hazard, same incident class. Now refused unless the
+heartbeat is stale or `--force` is passed.
+
+**C. Out-of-order completion is SURFACED, not refused.** A `done` task with an
+unfinished dep means the DAG and the record disagree. Deps are often soft
+ordering and a hard refusal would push agents to freehand around the route, so
+this emits `task_done_before_deps` (med) instead of raising.
+
+**D. `task.phase` was WRITE-ONLY.** Stored in `add_task`, echoed in
+`route_log`, used nowhere else — no validation, no filter, no rollup — while
+`brief.phases` was a separate list with its own `add_phase` verb. Two
+half-features that never met, which is exactly why nearly every task left it
+blank: it did nothing, so nobody filled it.
+
+Now `phase_rollup()` + `terra route phases` + `next --phase` + a slim current-
+phase line in sitrep. Design rules:
+
+- **Validate only when the brief declares phases.** A project using none keeps
+  free text — do not break it, and do not nag it (`_phase_attention` returns
+  early). Once phases ARE declared, an undeclared tag is refused at `add_task`.
+- **Empty phase is NOT exit-ready.** No tasks means UNPLANNED, not complete;
+  otherwise the lifecycle skips straight through unplanned work.
+- **Unreachable tasks block phase exit** and emit
+  `phase_exit_blocked_by_unreachable`. Without this, a phase full of routes
+  stranded on cancelled deps (§25) reads as "almost done, just waiting"
+  forever.
+- **Undeclared tags are reported but can never become `current`** — a typo must
+  not silently redefine where the program is.
+- **Unphased open tasks are declared** (`tasks_unphased`, info): they block no
+  phase exit and count toward no phase, which is a real hole and must be stated
+  rather than discovered.
+
+**What it found on CG-01 the moment it went live:** declared phases `p1..p5`,
+but the actual work tagged `phase1` — undeclared — holding 20 open routes with
+19 unreachable, while declared `p1` read **exit-READY** and the lifecycle
+reported "current phase: p2". Seven spellings of the same phase (`phase1`,
+`detailed_design`, `p1_detailed_design`, `P1`, `Phase 1`, `1`, `p1_detail`) and
+**99 of 118 open tasks carrying no phase at all**. The program would have
+reported Phase 1 complete. The division of labour is the point: the count stays
+honest about what it counted, and a SEPARATE alarm says the tagging is broken.
+
+### 27. Derived fields must never be persisted — and stripping them means EVERY read must recompute
+
+Two halves of one lesson, both found on live work.
+
+**Half 1 — the trap.** `pickable` / `waiting_on` were written into `route.json`
+even though both are computed from `deps`+`status` on every load. A lead
+repairing the dead DAG (§25) edited `waiting_on` directly, read the file back,
+saw its edit, and had it silently clobbered by the next `terra` command — its
+follow-up audit still reported the unrepaired count. **Had it trusted its own
+read-back it would have reported a clean spine over a dead DAG.** A computed
+field sitting in the file is an invitation to edit it. `save_route` now strips
+`DERIVED_TASK_FIELDS` so `deps` is the only lever, and
+`test_hand_edited_derived_field_cannot_fake_reachability` asserts that
+hand-clearing `waiting_on`/`pickable` cannot make a dead route look alive.
+
+**Half 2 — the regression that fix caused, which is the more important half.**
+`load_route` did NOT recompute; only `save_route`/`route_status` did. So with
+the fields stripped from disk, every consumer reading through `load_route` got
+`None` instead of `False` — and **`start_task`'s dependency interlock
+(`if t.get("pickable") is False or t.get("waiting_on")`) silently stopped
+firing**, letting a task with unmet deps be claimed. Caught only because
+`test_brief_route.py::test_route_deps_and_next` asserts the refusal.
+
+**The rule:** removing persisted computed state is only safe if the READ path
+always rebuilds it. `load_route` now calls `_recompute_ready`. Cost measured on
+a 1,283-task program: ~14 ms per load, negligible.
+
+**The generalisable shape:** a guard written as `x is False` fails OPEN when `x`
+becomes absent. Prefer `not t.get("pickable")` for interlocks, or guarantee the
+field's presence at the read boundary — do not leave a safety check depending
+on a key some code path may stop writing. Regression guard:
+`test_start_refuses_task_with_unmet_deps`.
+
+### 28. route.json is written CONCURRENTLY — it needed atomicity and a lost-update guard
+
+Several leads drive Terra at once. `save_route` was a bare
+`path.write_text()`: no atomicity, no locking, no staleness check. Two real
+failures on CG-01:
+
+1. **Torn reads.** A lead hit "raw JSON parse errors mid-batch" while a peer
+   wrote concurrently. `write_text` truncates then writes, so a reader landing
+   in that window parses a partial file — on the program's central record.
+2. **Silent lost updates**, which is worse. `load_route -> mutate ->
+   save_route` is a read-modify-write. Two leads that both load, both mutate
+   and both save mean **one edit vanishes with no error at all**. Nothing in
+   the system could detect it after the fact.
+
+Fixes, both in `save_route`:
+
+- **Atomic publish**: same-dir `mkstemp` + `flush` + `fsync` + `os.replace`,
+  with the temp unlinked on any exception. Readers now see only whole files.
+  Same-dir matters — `os.replace` is only atomic within a filesystem.
+- **Optimistic concurrency**: `load_route` stamps `_BASELINE_KEY`
+  (`_loaded_sha256`) with the sha256 of the bytes it read; `save_route`
+  re-hashes the file and raises **`ConcurrentRouteWrite`** if it moved. This
+  converts a silent lost update into a loud refusal naming the recovery
+  (re-read, re-apply). The key is popped before serialisation and is
+  asserted never to reach disk.
+
+Design notes:
+
+- **Records with no baseline are allowed through** (init paths, hand-built
+  dicts). A missing baseline means "not loaded from disk", not "stale" —
+  refusing those would break `init_route`.
+- We did NOT reach for `fcntl.flock`. A lock would have to be held across
+  load->mutate->save (a caller-side API change touching every mutator) and
+  would deadlock across the agent boundary if a lead died holding it.
+  Detect-and-refuse is weaker than mutual exclusion but it is honest, has no
+  liveness hazard, and the retry is trivially safe.
+- **This is an ALREADY-LIVE change under an editable install.** Source edits
+  take effect for running agents immediately — there is no deploy step to
+  gate on. When patching Terra while leads are working, run the full suite AND
+  smoke the live program (`route status`, `sitrep`, one real write) in the
+  same turn.
+
+Tests: `tests/test_route_concurrency.py` — lost-update refused, reload-retry
+succeeds, uncontended save unaffected (can-fail), baseline never on disk, and
+a simulated crash mid-write leaves the original byte-identical with no temp
+leftovers.
+
+### 29. A warning that keeps being missed is decoration — escalate it to a refusal
+
+`link_run` printed a stderr NOTE when a linked run added **zero samples**
+(quantity-name mismatch: the unknown declares `foo`, the probe emits
+`foo_bool`). The note shipped 2026-07-28 after five FlightGear sessions were
+silently worth nothing. **By 2026-08-08 the identical defect had voided
+evidence at least three more times in a single day** — canon empennage
+presence, the D9 washout trade verdict, and a tmp-path-literals sweep. Each
+time the link "succeeded", `n` stayed 0, and a real finding could not graduate
+despite good evidence sitting behind it.
+
+`link_run` now RAISES `LinkAddedNoSample` unless `allow_no_sample=True`
+(`--allow-no-sample`). The message names the declared quantity, what the run
+actually emitted, `NAME MISMATCH` when they differ, and the way forward.
+
+The generalisable rule: **stderr NOTEs are for things an agent should notice;
+they are NOT sufficient for things that silently destroy evidence.** If a
+warning has fired repeatedly on real work and the defect still recurs, the
+warning is not working — make the operation fail and give it a deliberate
+override. Track recurrence: one miss is bad luck, three in a day is a design
+verdict.
+
+Where the override is legitimately needed: cohort fixtures link a run to a
+member whose quantity that solve does not emit, to exercise RUN-SET
+consistency rather than evidence weight (`tests/test_cohorts.py`). Forcing
+those to say `allow_no_sample=True` documents the edge case instead of hiding
+it — which is the point.
+
+Tests: `test_link_run_REFUSES_when_it_adds_no_sample` (refusal, message
+content, record left untouched, override works) plus the can-fail
+`test_link_run_still_succeeds_when_it_DOES_add_a_sample`.
+
+### 30. Quantity NAME is the only match key — and it bites in BOTH directions
+
+Terra corroborates by grouping runs on the quantity name. Two failure modes,
+both observed on CG-01 within hours of each other:
+
+- **False negative:** a `pml_` prefix on an otherwise genuine second method
+  made it invisible — `methods` stuck at 1, so a real corroboration never
+  counted. (Same family as §29's zero-sample link.)
+- **False POSITIVE, which is worse:** two probes both emitting `n_stale` over
+  **different denominators** (65 live working sheets vs 44 frozen release
+  files) produced `methods=2` and a reported value of **3.5 — the mean of 7
+  and 0.** A number describing nothing, presented as corroborated.
+
+The false positive was completely silent: with no `tolerance` declared,
+`compute_corroboration` sets `agree=None` and deliberately "surfaces the
+spread, doesn't judge". Honest about not judging — but nothing said the
+reported mean was averaging across an unjudged gap.
+
+`methods_unjudged(stats)` now fires when **methods>=2 AND no tolerance AND
+`spread_rel > UNJUDGED_SPREAD_REL` (0.10)**, emitted by `check_gate` as a
+NON-blocking notice. It cannot claim disagreement (that is
+`methods_disagree`'s job and requires a tolerance) — it says agreement is
+*unjudgeable* and names both remedies: declare a tolerance, or check the two
+probes measure the SAME proposition.
+
+Deliberately a notice, not a violation: a wide spread with no tolerance is
+often just an un-tuned young belief, and making it blocking would wall off
+ordinary survey work. It found **2 real instances on the live program the
+first time it ran**, one at 300% across 3 methods.
+
+Design note: do NOT try to auto-detect "different populations". Terra cannot
+know a denominator. The honest move is to surface that the question is
+unanswered and make a human name the tolerance — which is exactly the act
+that forces someone to ask what the two probes are measuring.
+
+Tests: `tests/test_methods_unjudged.py` — flagged when far apart and
+untoleranced, cleared (into real `methods_disagree`) once a tolerance is
+declared, plus can-fails for near-agreement and single-method.
+
+### 31. A flaky test is a lying instrument — fix it, do not work around it
+
+`test_json_flag_accepted_on_every_read_verb` compared the payloads of TWO
+separate CLI invocations byte-for-byte. Those runs happen at different
+wall-clock times and the payloads carry `updated_at`, `as_of` and
+age-derived fields like `hours_since_heartbeat` — so it failed whenever the
+pair straddled a second boundary, on a rotating cast of `argv` ids (it hit
+`argv6`, then `sitrep`, then `argv6` again).
+
+I worked around it THREE times before fixing it — re-running the suite to
+confirm "it's just the flake." That habit is the damage: a test that fails
+randomly trains everyone, including me, to discount real failures. It also
+cost a verification cycle every time Terra changed.
+
+Fix: `_stable()` recursively strips `_VOLATILE_KEYS` (clock-derived fields)
+before comparing. The claim under test is that `--json` is an accepted
+**no-op**, not that the clock stood still.
+
+**Do not just widen the assertion — prove it still has teeth.** Verified by
+hand that `_stable` compares EQUAL when only volatile fields differ, and still
+CATCHES a changed value and an extra list row. Then ran it 12× in isolation:
+12/12 green.
+
+Rule: when a test fails intermittently, treat it as a defect in the test's
+claim, not as noise. Ask what the test actually asserts, narrow it to that,
+and add a can-fail proving the narrowed version can still fail.

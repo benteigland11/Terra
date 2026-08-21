@@ -195,3 +195,136 @@ def test_gate_excludes_retired_knowns_from_debt(tmp_path: Path, monkeypatch):
         n["kind"] == "known_retired" and n["id"] == "sparse"
         for n in after["notices"]
     ), "it must still be VISIBLE as a notice — retired, not vanished"
+
+
+def test_supersede_warns_about_active_copies_on_other_maps(
+    tmp_path: Path, monkeypatch, capsys
+):
+    """Supersession is a LOCAL write and Terra gave no signal.
+
+    A child map retiring its copy left `global` serving a TAILLESS airframe as
+    the certified master OML for days (2026-07-28), and did the same to
+    `mtow_final`. The warning must NAME the maps still serving it.
+    """
+    monkeypatch.chdir(tmp_path)
+    from terra.paths import create_session_map, scoped_map
+    from terra.knowns import supersede_known
+
+    root = tmp_path
+    _mk_known(root, "shared_belief")
+    create_session_map(root, "childmap")
+    # Probes are GLOBAL, so the child copy needs its own probe/unknown ids but
+    # graduates to the SAME known id — which is exactly the real shape.
+    init_probe(root, "p_child", purpose="p")
+    _write_measure_probe(root, "p_child", quantity="q", value=4.0)
+    with scoped_map("childmap"):
+        rid = run_probe(root, "p_child", to={"kind": "region"}).get("id")
+        create_unknown(
+            root, "u_child", claim="c?", evidence_needed="e",
+            map_type="number", quantity="q",
+        )
+        link_run(root, "u_child", rid)
+        graduate_unknown(root, "u_child", known_id="shared_belief")
+        supersede_known(root, "shared_belief", reason="wrong on this map")
+
+    err = capsys.readouterr().err
+    assert "still ACTIVE" in err, f"no sibling warning; stderr={err!r}"
+    assert "global" in err, "must NAME the map still serving it"
+    assert "does NOT propagate" in err
+    assert "terra --map global known supersede" in err, "must give the fix"
+
+
+def test_no_sibling_warning_when_no_other_copy(tmp_path: Path, monkeypatch, capsys):
+    """The discriminator: a lone belief must not emit a spurious warning."""
+    monkeypatch.chdir(tmp_path)
+    from terra.knowns import supersede_known
+
+    _mk_known(tmp_path, "lonely")
+    supersede_known(tmp_path, "lonely", reason="just wrong")
+    assert "still ACTIVE" not in capsys.readouterr().err
+
+
+def test_unretiring_moves_the_tombstone_to_history(proj):
+    """A stale `superseded` block on an ACTIVE known is a self-contradicting
+    record — it reads as "retired for <reason>" while being served as current.
+
+    Hit for real 2026-07-28: an accidental supersede was reverted with
+    `known status … active` and the tombstone stayed put.
+    """
+    from terra.knowns import set_known_status, supersede_known
+
+    _mk_known(proj, "oops")
+    supersede_known(proj, "oops", reason="retired by mistake")
+    assert load_known(proj, "oops").get("superseded")
+
+    rec = set_known_status(proj, "oops", "active")
+
+    assert rec["status"] == "active"
+    assert "superseded" not in rec, "tombstone must not sit on a live belief"
+    hist = rec.get("superseded_history") or []
+    assert len(hist) == 1, "audit trail must survive"
+    assert hist[0]["reason"] == "retired by mistake"
+    assert hist[0]["reverted_at"], "must record WHEN it was un-retired"
+
+
+def test_status_change_between_live_states_keeps_no_history(proj):
+    """The discriminator: an ordinary status edit must not fabricate history."""
+    from terra.knowns import set_known_status
+
+    _mk_known(proj, "plain")
+    rec = set_known_status(proj, "plain", "provisional")
+    assert "superseded_history" not in rec
+
+
+def test_stale_tombstone_self_heals_on_any_status_write(proj):
+    """Records already sitting in the contradictory state must heal too —
+    transition-keying missed them, so they stayed broken forever."""
+    import json as _json
+    from terra.knowns import set_known_status
+    from terra.paths import known_path
+
+    _mk_known(proj, "already_broken")
+    # Simulate the pre-existing bad state: active known carrying a tombstone.
+    p = known_path(proj, "already_broken")
+    rec = _json.loads(p.read_text())
+    rec["status"] = "active"
+    rec["superseded"] = {"at": "2026-07-28T00:00:00Z", "reason": "legacy residue"}
+    p.write_text(_json.dumps(rec, indent=2, sort_keys=True) + "\n")
+
+    healed = set_known_status(proj, "already_broken", "active")
+    assert "superseded" not in healed, "must heal without a status transition"
+    assert (healed.get("superseded_history") or [])[0]["reason"] == "legacy residue"
+
+
+def test_duplicate_sample_runs_are_reported_not_silently_counted(proj):
+    """`n` counts RUNS, not distinct samples — a deterministic re-run doubles
+    the evidence count the confidence ladder rests on. 196 knowns on CG-01
+    carry duplicates, 146 at med. Report it; do NOT re-rate silently.
+    """
+    from terra.knowns import link_run_known
+    from terra.probe_run import run_probe
+
+    _mk_known(proj, "det", value=7.0)
+    # Same probe, same deterministic value → byte-identical reading.
+    rid2 = run_probe(proj, "p_det", to={"kind": "region", "id": "again"}).get("id")
+    link_run_known(proj, "det", rid2)
+
+    st = load_known(proj, "det")["stats"]
+    assert st["n"] == 2, "n still counts runs — behaviour deliberately unchanged"
+    assert st["distinct_sample_signatures"] == 1, "only ONE real sample exists"
+    assert st["duplicate_sample_runs"] == 1, "the inflation must be visible"
+
+
+def test_genuinely_distinct_samples_report_zero_duplicates(proj):
+    """The discriminator: real repeat measurements must not be flagged."""
+    from terra.knowns import link_run_known
+    from terra.probe_run import run_probe
+
+    _mk_known(proj, "varied", value=1.0)
+    _write_measure_probe(proj, "p_varied", quantity="q", value=2.0)
+    rid2 = run_probe(proj, "p_varied", to={"kind": "region", "id": "b"}).get("id")
+    link_run_known(proj, "varied", rid2)
+
+    st = load_known(proj, "varied")["stats"]
+    assert st["distinct_sample_signatures"] == 2
+    assert st["duplicate_sample_runs"] == 0

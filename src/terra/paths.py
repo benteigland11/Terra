@@ -46,9 +46,25 @@ _active_map_id: ContextVar[str | None] = ContextVar("terra_active_map_id", defau
 
 
 def find_project_root(start: Path | None = None) -> Path | None:
-    """Walk parents for a directory containing `.terra/`. None if missing."""
+    """Walk parents for a directory containing `.terra/`. None if missing.
+
+    SKIPS a candidate that is itself named `.terra`. A probe that writes a
+    RELATIVE `.terra/...` path while its cwd is already inside `.terra`
+    creates a nested `.terra/.terra/`, and the naive walk then answers
+    "the project root is `<proj>/.terra`". Every belief read after that
+    silently resolves against the wrong tree — the probe reports no error and
+    simply reads a different map. Observed live on CG-01 2026-08-08: a stray
+    empty `.terra/.terra/artifacts/` broke probe-internal assumption reads
+    program-wide while the CLI (which resolves from the real cwd) kept
+    working, so the two disagreed and only the probes were wrong.
+
+    A directory named `.terra` is never a project root, so skipping it costs
+    nothing and removes the whole failure class.
+    """
     cur = (start or Path.cwd()).resolve()
     for candidate in [cur, *cur.parents]:
+        if candidate.name == TERRA_DIRNAME:
+            continue
         if (candidate / TERRA_DIRNAME).is_dir():
             return candidate
     return None

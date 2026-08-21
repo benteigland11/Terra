@@ -6,8 +6,11 @@ Does not store multi-leg belief recipes (that's evidence plans).
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import re
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -36,7 +39,164 @@ TASK_ROLES = frozenset({"survey", "enabler", "deliverable", "orchestration", "an
 TASK_BUCKETS = frozenset({"low", "medium", "high"})
 BUCKET_POINTS: dict[str, int] = {"low": 3, "medium": 8, "high": 21}
 POINTS_BUCKET: dict[int, str] = {v: k for k, v in BUCKET_POINTS.items()}
+
+# Priority: WHICH work, independent of HOW MUCH effort (bucket).
+# Deliberately p0..p3 and NOT low/medium/high — those words already mean the
+# effort bucket, and a `--bucket high` typed when `--priority p0` was meant is
+# a silent wrong-field write that nothing downstream would catch.
+TASK_PRIORITIES: tuple[str, ...] = ("p0", "p1", "p2", "p3")
+DEFAULT_PRIORITY = "p2"
+PRIORITY_RANK: dict[str, int] = {p: i for i, p in enumerate(TASK_PRIORITIES)}
+PRIORITY_MEANING: dict[str, str] = {
+    "p0": "spine — the program cannot finish without this",
+    "p1": "required for the current phase",
+    "p2": "normal backlog (default)",
+    "p3": "deferred — kept as record, not scheduled",
+}
+# Computed on every load from deps+status — NEVER canonical, never persisted.
+# See save_route for why writing these to disk was actively harmful.
+_BASELINE_KEY = "_loaded_sha256"
+
+
+class ConcurrentRouteWrite(RuntimeError):
+    """Another agent wrote route.json between this load and this save."""
+
+
+DERIVED_TASK_FIELDS = frozenset(
+    {"pickable", "waiting_on", "waiting_on_cancelled", "unreachable_via"}
+)
+
 _SLUG_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+
+
+def declared_phases(project_root: Path) -> list[dict[str, Any]]:
+    """Ordered phases from the brief. Empty when the project declares none.
+
+    Order is the list order — a lifecycle implies sequence, and `brief phase`
+    appends, so index IS the intended progression.
+    """
+    try:
+        from .brief import load_brief
+
+        rec = load_brief(project_root)
+    except (FileNotFoundError, ValueError, OSError):
+        return []
+    out = []
+    for p in rec.get("phases") or []:
+        if isinstance(p, dict) and p.get("id"):
+            out.append(
+                {
+                    "id": p["id"],
+                    "title": p.get("title") or p["id"],
+                    # legacy phases predate status; absent == open
+                    "status": p.get("status") or "open",
+                    "closed_reason": p.get("closed_reason"),
+                }
+            )
+    return out
+
+
+def phase_rollup(project_root: Path, tasks: list[dict[str, Any]]) -> dict[str, Any]:
+    """Per-phase lifecycle state: can we exit this phase, and where are we?
+
+    `task.phase` was a write-only string — stored, echoed in route_log, used
+    nowhere else — while `brief.phases` was a separate list with its own verb.
+    Two half-features that never met, which is why almost every task left it
+    blank: it did nothing, so nobody filled it.
+
+    Exit criterion: a phase is exit-ready when it holds at least one task and
+    every task is done or cancelled. UNREACHABLE tasks (stranded on a cancelled
+    dep) are counted separately and BLOCK exit-readiness — otherwise a phase
+    full of dead routes reads as "almost done, just waiting" forever, which is
+    exactly the failure that hid a dead spine for weeks.
+    """
+    declared = declared_phases(project_root)
+    order = [p["id"] for p in declared]
+    titles = {p["id"]: p["title"] for p in declared}
+    closed = {p["id"]: p["status"] == "closed" for p in declared}
+    close_reason = {p["id"]: p.get("closed_reason") for p in declared}
+
+    rows: dict[str, dict[str, Any]] = {}
+
+    def row(pid: str) -> dict[str, Any]:
+        if pid not in rows:
+            rows[pid] = {
+                "id": pid,
+                "title": titles.get(pid, pid),
+                "declared": pid in titles,
+                "closed": bool(closed.get(pid)),
+                "closed_reason": close_reason.get(pid),
+                "open": 0,
+                "done": 0,
+                "cancelled": 0,
+                "blocked": 0,
+                "in_progress": 0,
+                "unreachable": 0,
+                "points_open": 0,
+                "by_priority_open": {p: 0 for p in TASK_PRIORITIES},
+            }
+        return rows[pid]
+
+    for pid in order:
+        row(pid)
+
+    unphased = 0
+    for t in tasks:
+        pid = (t.get("phase") or "").strip()
+        if not pid:
+            if t.get("status") not in ("done", "cancelled"):
+                unphased += 1
+            continue
+        r = row(pid)
+        st = t.get("status")
+        if st == "done":
+            r["done"] += 1
+        elif st == "cancelled":
+            r["cancelled"] += 1
+        else:
+            r["open"] += 1
+            r["points_open"] += _task_points(t)
+            r["by_priority_open"][t.get("priority") or DEFAULT_PRIORITY] += 1
+            if st == "blocked":
+                r["blocked"] += 1
+            if st == "in_progress":
+                r["in_progress"] += 1
+            if t.get("waiting_on_cancelled") or t.get("unreachable_via"):
+                r["unreachable"] += 1
+
+    for r in rows.values():
+        total = r["open"] + r["done"] + r["cancelled"]
+        r["total"] = total
+        r["exit_ready"] = bool(total) and r["open"] == 0
+        r["exit_blockers"] = r["open"]
+
+    # Current phase = first DECLARED, NOT-CLOSED phase. Closure is a declared
+    # decision; exit-readiness is a computed fact. We advance on the DECISION,
+    # because a phase whose work predates tagging shows zero tasks and would
+    # otherwise pin `current` to an empty shell forever. Undeclared phases
+    # (free-text drift) can never become current — a typo must not silently
+    # redefine where the program is.
+    current = None
+    for pid in order:
+        if not rows[pid]["closed"]:
+            current = pid
+            break
+
+    ordered = [rows[p] for p in order] + [
+        r for pid, r in rows.items() if pid not in titles
+    ]
+    return {
+        "declared": order,
+        "current": current,
+        "phases": ordered,
+        "unphased_open": unphased,
+        "undeclared_used": [pid for pid in rows if pid not in titles],
+    }
+
+
+def priority_rank(task: dict[str, Any]) -> int:
+    """Sort key. Unset/garbage priority sorts as the default, never first."""
+    return PRIORITY_RANK.get(task.get("priority") or DEFAULT_PRIORITY, PRIORITY_RANK[DEFAULT_PRIORITY])
 
 
 def points_for_bucket(bucket: str) -> int:
@@ -152,6 +312,11 @@ def validate_route(data: Any) -> list[str]:
         deps = t.get("deps") or []
         if not isinstance(deps, list):
             blocks.append(f"tasks[{i}].deps must be a list")
+        prio = t.get("priority")
+        if prio is not None and prio not in PRIORITY_RANK:
+            blocks.append(
+                f"tasks[{i}].priority must be one of {list(TASK_PRIORITIES)} or null"
+            )
         bkt = t.get("bucket")
         pts = t.get("points")
         if bkt is not None and bkt not in TASK_BUCKETS:
@@ -245,16 +410,35 @@ def load_route(project_root: Path) -> dict[str, Any]:
         raise FileNotFoundError(
             "no route — terra route init  (after terra brief init)"
         )
-    data = json.loads(path.read_text(encoding="utf-8"))
+    raw = path.read_text(encoding="utf-8")
+    data = json.loads(raw)
+    # Optimistic-concurrency baseline. Several leads drive Terra CONCURRENTLY,
+    # and load->mutate->save is a read-modify-write: two leads that both load,
+    # both mutate and both save mean one edit vanishes with no error at all.
+    # Stamping what we read lets save_route turn that SILENT lost update into
+    # a loud refusal. Private key, stripped before write.
+    data[_BASELINE_KEY] = hashlib.sha256(raw.encode("utf-8")).hexdigest()
     if "plan_locked" not in data:
         data["plan_locked"] = False
     if "plan_locked_at" not in data:
         data["plan_locked_at"] = None
     if "sectors" not in data or data["sectors"] is None:
         data["sectors"] = []
+    # Derived fields are no longer persisted (see save_route), so EVERY read
+    # must recompute them. Without this, consumers that GUARD on them read
+    # None instead of False and stop guarding — start_task's deps interlock
+    # died exactly this way, letting a task with unmet deps be claimed.
+    # Stripping computed state from disk is only safe if the read path always
+    # rebuilds it.
+    data["tasks"] = _recompute_ready(list(data.get("tasks") or []))
     for t in data.get("tasks") or []:
         if not isinstance(t, dict):
             continue
+        # legacy tasks predate priority — backfill the DEFAULT, never p0.
+        # Silently promoting an unranked backlog to urgent would make the
+        # first sorted `next` a lie. No schema bump; optional field.
+        if t.get("priority") not in PRIORITY_RANK:
+            t["priority"] = DEFAULT_PRIORITY
         # legacy: copy working → plan if plan missing
         if "plan_points" not in t and t.get("points") is not None:
             t["plan_points"] = t.get("points")
@@ -280,9 +464,52 @@ def save_route(project_root: Path, record: dict[str, Any]) -> Path:
         raise ValueError("invalid route:\n  - " + "\n  - ".join(blocks))
     terra_root(project_root).mkdir(parents=True, exist_ok=True)
     path = route_path(project_root)
-    path.write_text(
-        json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    # Persist ONLY canonical state. pickable/waiting_on/waiting_on_cancelled/
+    # unreachable_via are DERIVED from deps+status on every load — writing them
+    # to disk made them look like levers. A lead repairing the DAG edited
+    # `waiting_on`, read the file back, saw its edit, and had it silently
+    # clobbered by the next terra command; its follow-up audit still reported
+    # the unrepaired count. Had it trusted its own read-back it would have
+    # reported a clean spine over a dead DAG. A computed field must not sit in
+    # the file inviting an edit — `deps` is the only lever.
+    on_disk = dict(record)
+    on_disk["tasks"] = [
+        {k: v for k, v in t.items() if k not in DERIVED_TASK_FIELDS}
+        for t in on_disk.get("tasks") or []
+    ]
+    baseline = on_disk.pop(_BASELINE_KEY, None)
+    if baseline is not None and path.is_file():
+        current = hashlib.sha256(
+            path.read_text(encoding="utf-8").encode("utf-8")
+        ).hexdigest()
+        if current != baseline:
+            raise ConcurrentRouteWrite(
+                "route.json changed on disk since it was loaded — another "
+                "agent wrote it while you were editing. Your change was NOT "
+                "saved (saving would have silently discarded theirs). "
+                "Re-read the route and re-apply your edit."
+            )
+    payload = json.dumps(on_disk, indent=2, sort_keys=True) + "\n"
+    # ATOMIC publish. A bare write_text leaves the file truncated-then-partial
+    # for a moment, and a concurrent reader lands mid-write and gets a JSON
+    # parse error on the program's central record — observed live on CG-01
+    # ("raw JSON parse errors mid-batch" while a peer lead wrote). Same-dir
+    # temp + fsync + os.replace makes readers see only whole files.
+    fd, tmp = tempfile.mkstemp(
+        dir=str(path.parent), prefix=".route.", suffix=".tmp"
     )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(payload)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
     return path
 
 
@@ -303,7 +530,26 @@ def _recompute_ready(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
             for d in deps
             if d not in by_id or by_id[d].get("status") != "done"
         ]
+        # A CANCELLED dep never becomes done, so the dependent waits forever
+        # while reading status=ready/waiting_on=[…] — indistinguishable from
+        # work that is merely queued. This silently stranded 22 of 118 open
+        # routes on a live program, including the only CFD route and the root
+        # of the whole flight-demo chain, and NOTHING alarmed.
+        # We deliberately do NOT auto-unblock: a cancelled basis often means
+        # the dependent's premise died too, and silently making it pickable
+        # would be the worse lie. Instead the death is made VISIBLE and a
+        # human/lead decides: re-point the dep, or cancel the dependent.
+        dead = [
+            d
+            for d in deps
+            if d in by_id and by_id[d].get("status") == "cancelled"
+        ]
         t["status"] = "ready"
+        t.pop("unreachable_via", None)
+        if dead:
+            t["waiting_on_cancelled"] = dead
+        else:
+            t.pop("waiting_on_cancelled", None)
         if waiting:
             t["waiting_on"] = waiting
             t["pickable"] = False
@@ -311,8 +557,32 @@ def _recompute_ready(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
             t.pop("waiting_on", None)
             t["pickable"] = True
         result.append(t)
-    order = [t["id"] for t in tasks if isinstance(t, dict) and t.get("id")]
     by_new = {t["id"]: t for t in result}
+    # Unreachability is TRANSITIVE: a task waiting on a stranded task is
+    # equally dead. Reporting only the direct hop understated a live program
+    # by 2.4x (9 reported vs 22 actually unreachable), and an undercount on
+    # a "what can never be worked" instrument is the failure mode this
+    # whole feature exists to kill. Fixpoint to closure.
+    unreachable: dict[str, str] = {
+        tid: tid for tid, t in by_new.items() if t.get("waiting_on_cancelled")
+    }
+    changed = True
+    while changed:
+        changed = False
+        for tid, t in by_new.items():
+            if tid in unreachable or t.get("status") in ("done", "cancelled"):
+                continue
+            for d in t.get("deps") or []:
+                if d in unreachable:
+                    unreachable[tid] = unreachable[d]
+                    changed = True
+                    break
+    for tid, t in by_new.items():
+        root = unreachable.get(tid)
+        # the root names ITSELF; only downstream tasks carry unreachable_via
+        if root is not None and root != tid:
+            t["unreachable_via"] = root
+    order = [t["id"] for t in tasks if isinstance(t, dict) and t.get("id")]
     return [by_new[i] for i in order if i in by_new]
 
 
@@ -347,9 +617,29 @@ def add_task(
     bucket: str | None = None,
     points: int | None = None,
     sector_id: str | None = None,
+    priority: str | None = None,
 ) -> dict[str, Any]:
     if not _SLUG_RE.match(task_id):
         raise ValueError(f"task id must match {_SLUG_RE.pattern}")
+    # Validate phase against the brief ONLY when phases are declared. A
+    # project that declares none keeps free-text (don't break it); one that
+    # declared a lifecycle gets a typo caught at the write, not discovered
+    # later as a phase that quietly holds one orphan task.
+    ph = (phase or "").strip()
+    if ph:
+        _declared = [p["id"] for p in declared_phases(project_root)]
+        if _declared and ph not in _declared:
+            raise ValueError(
+                f"phase {ph!r} is not declared in the brief — valid: "
+                f"{_declared}. Add it first (terra brief phase <id> "
+                f"--title \"…\") or use one of those."
+            )
+    prio = priority or DEFAULT_PRIORITY
+    if prio not in PRIORITY_RANK:
+        raise ValueError(
+            f"priority must be one of {list(TASK_PRIORITIES)} — "
+            + "; ".join(f"{k}={v}" for k, v in PRIORITY_MEANING.items())
+        )
     if skill not in SKILLS:
         raise ValueError(f"skill must be one of {sorted(SKILLS)}")
     if role not in TASK_ROLES:
@@ -404,6 +694,7 @@ def add_task(
             "acceptance": list(acceptance or []),
             "map_id": map_id,
             "sector_id": sector_id,
+            "priority": prio,
             "bucket": bkt,
             "points": pts,
             "plan_bucket": bkt,
@@ -711,6 +1002,11 @@ def complete_task(
 ) -> dict[str, Any]:
     rec = load_route(project_root)
     task = _get_task(rec, task_id)
+    # A CANCELLED task marked done launders a dead premise into a completion,
+    # and route_log then renders it as a genuine completion event. `done` is
+    # guarded too: re-completing appends a second evidence block as if the
+    # work happened twice.
+    _refuse_if_terminal(task, "complete")
 
     problems = validate_evidence_refs(
         project_root, run_ids=run_ids, known_ids=known_ids
@@ -762,6 +1058,41 @@ def complete_task(
     return _get_task(load_route(project_root), task_id)
 
 
+# `done` and `cancelled` are TERMINAL: each asserts a settled outcome that
+# later records (evidence, superseded beliefs, cancelled_reason) hang off.
+# Re-opening one silently rewrites history — a cancelled dead premise could be
+# marked `done` and would then render in `route log` as a genuine completion.
+TERMINAL_STATUSES = frozenset({"done", "cancelled"})
+
+_TERMINAL_ESCAPE = {
+    "done": (
+        "supersede the belief it produced (terra known supersede), or add a "
+        "NEW task for the follow-on work — do not re-open the completion"
+    ),
+    "cancelled": (
+        "add a NEW task if the premise came back to life; a cancelled route "
+        "records that this work was never valid, and that record is evidence"
+    ),
+}
+
+
+def _refuse_if_terminal(task: dict[str, Any], verb: str) -> None:
+    """Guard every state-changing verb against terminal-state resurrection.
+
+    This rule already existed in exactly ONE place (cancel refusing on done)
+    and was never applied systematically, so `cancelled --complete--> done`,
+    `cancelled --unblock--> ready` (dead work back in the pickable queue),
+    `cancelled --block-->` and `done --block-->` all silently succeeded.
+    """
+    st = task.get("status")
+    if st in TERMINAL_STATUSES:
+        raise ValueError(
+            f"task {task.get('id')!r} is {st} — {verb} would re-open a "
+            f"terminal state and rewrite what the record says happened. "
+            f"Instead: {_TERMINAL_ESCAPE[st]}."
+        )
+
+
 def block_task(
     project_root: Path,
     task_id: str,
@@ -771,7 +1102,7 @@ def block_task(
     if not reason or not str(reason).strip():
         raise ValueError("reason required")
     rec = load_route(project_root)
-    _get_task(rec, task_id)
+    _refuse_if_terminal(_get_task(rec, task_id), "block")
     for task in rec["tasks"]:
         if task.get("id") == task_id:
             task["status"] = "blocked"
@@ -784,9 +1115,89 @@ def block_task(
     return _get_task(load_route(project_root), task_id)
 
 
+def cancel_task(
+    project_root: Path,
+    task_id: str,
+    *,
+    reason: str,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Retire a task that should never be worked. NOT the same as done.
+
+    ``cancelled`` was in TASK_STATUSES from the start but had no CLI verb, so
+    the only disposals available were `block` (leaves it as standing debt that
+    reads like pending work) or `complete` (asserts an outcome that never
+    happened). Dead-premise routes therefore accumulated as permanent blocked
+    debt — 7 of them by 2026-07-27, several citing "PM authorization needed".
+
+    The reason is mandatory and preserved: a cancelled route must say WHY it
+    was never valid, or the next planner re-derives it.
+    """
+    if not reason or not str(reason).strip():
+        raise ValueError("reason required — a cancelled route must say why")
+    rec = load_route(project_root)
+    t = _get_task(rec, task_id)
+    _refuse_if_terminal(t, "cancel")
+    # Cancelling live claimed work destroys it with no interlock, while
+    # `start_task` REFUSES to touch a task whose owner is alive. Same
+    # double-writer hazard, so the same guard: force an explicit override.
+    if t.get("status") == "in_progress" and not force:
+        hb = _parse_iso(t.get("last_heartbeat_at"))
+        from datetime import datetime, timezone
+
+        age_h = (
+            (datetime.now(timezone.utc) - hb).total_seconds() / 3600.0
+            if hb is not None
+            else None
+        )
+        if age_h is None or age_h < HEARTBEAT_STALE_HOURS:
+            owner = t.get("owner_agent")
+            raise ValueError(
+                f"task {task_id} is in_progress under {owner!r} with a "
+                f"{'fresh' if age_h is not None else 'never-stamped'} "
+                f"heartbeat — cancelling would destroy work that may be "
+                f"running right now. VERIFY the owner is dead, then "
+                f"--force. (start_task enforces the same interlock; cancel "
+                f"used to bypass it.)"
+            )
+    for task in rec["tasks"]:
+        if task.get("id") == task_id:
+            task["status"] = "cancelled"
+            task["cancelled_reason"] = reason.strip()
+            task["cancelled_at"] = _now()
+            task["updated_at"] = _now()
+            task.pop("blocked_reason", None)
+            task["owner_agent"] = None
+            task["last_heartbeat_at"] = None
+            task["pickable"] = False
+    save_route(project_root, rec)
+    return _get_task(load_route(project_root), task_id)
+
+
+def dependents_of(
+    project_root: Path, task_id: str, *, live_only: bool = True
+) -> list[dict[str, Any]]:
+    """Tasks that declare task_id as a dep.
+
+    Cancelling a task STRANDS these permanently — a cancelled dep never turns
+    done, so the dependent waits forever while reading status=ready. Callers
+    surface them so the stranding is a DECISION, not a side effect discovered
+    weeks later.
+    """
+    rec = load_route(project_root)
+    out = []
+    for t in rec.get("tasks") or []:
+        if not isinstance(t, dict) or task_id not in (t.get("deps") or []):
+            continue
+        if live_only and t.get("status") in ("done", "cancelled"):
+            continue
+        out.append(t)
+    return out
+
+
 def unblock_task(project_root: Path, task_id: str) -> dict[str, Any]:
     rec = load_route(project_root)
-    _get_task(rec, task_id)
+    _refuse_if_terminal(_get_task(rec, task_id), "unblock")
     for task in rec["tasks"]:
         if task.get("id") == task_id:
             task["status"] = "ready"
@@ -796,7 +1207,104 @@ def unblock_task(project_root: Path, task_id: str) -> dict[str, Any]:
     return _get_task(load_route(project_root), task_id)
 
 
-def next_tasks(project_root: Path, *, limit: int = 5) -> list[dict[str, Any]]:
+def set_task_priority(
+    project_root: Path,
+    task_ids: list[str],
+    *,
+    priority: str,
+    reason: str | None = None,
+) -> list[dict[str, Any]]:
+    """Re-rank tasks. Priority is orthogonal to effort and to the plan
+    baseline — it never touches points/plan_points, so re-ranking cannot
+    move the budget and needs no plan unlock."""
+    if priority not in PRIORITY_RANK:
+        raise ValueError(
+            f"priority must be one of {list(TASK_PRIORITIES)} — "
+            + "; ".join(f"{k}={v}" for k, v in PRIORITY_MEANING.items())
+        )
+    rec = load_route(project_root)
+    tasks = list(rec.get("tasks") or [])
+    by_id = {t.get("id"): t for t in tasks if isinstance(t, dict)}
+    missing = [tid for tid in task_ids if tid not in by_id]
+    if missing:
+        raise ValueError(f"unknown task id(s): {', '.join(sorted(missing))}")
+    changed: list[dict[str, Any]] = []
+    for tid in task_ids:
+        t = by_id[tid]
+        prev = t.get("priority") or DEFAULT_PRIORITY
+        t["priority"] = priority
+        t["updated_at"] = _now()
+        if reason:
+            ev = list(t.get("evidence") or [])
+            ev.append(
+                {
+                    "at": _now(),
+                    "kind": "priority",
+                    "note": f"priority {prev} → {priority}: {reason}",
+                }
+            )
+            t["evidence"] = ev
+        changed.append(t)
+    rec["tasks"] = tasks
+    save_route(project_root, rec)
+    fresh = load_route(project_root)
+    return [_get_task(fresh, t["id"]) for t in changed]
+
+
+def set_task_phase(
+    project_root: Path,
+    task_ids: list[str],
+    *,
+    phase: str,
+    reason: str | None = None,
+) -> list[dict[str, Any]]:
+    """Re-tag tasks into a phase.
+
+    Needed because `--phase` was write-once at creation: work could never
+    move between lifecycle stages, which makes a lifecycle unmanageable.
+    Like priority, this touches no points and no plan baseline, so it needs
+    no plan unlock. Terminal tasks CAN be re-phased — that is history
+    re-filing, not resurrection; it changes no outcome.
+    """
+    ph = (phase or "").strip()
+    if not ph:
+        raise ValueError("phase required (use --phase <id>)")
+    declared = [p["id"] for p in declared_phases(project_root)]
+    if declared and ph not in declared:
+        raise ValueError(
+            f"phase {ph!r} is not declared in the brief — valid: {declared}"
+        )
+    rec = load_route(project_root)
+    tasks = list(rec.get("tasks") or [])
+    by_id = {t.get("id"): t for t in tasks if isinstance(t, dict)}
+    missing = [tid for tid in task_ids if tid not in by_id]
+    if missing:
+        raise ValueError(f"unknown task id(s): {', '.join(sorted(missing))}")
+    changed = []
+    for tid in task_ids:
+        t = by_id[tid]
+        prev = t.get("phase") or "(none)"
+        t["phase"] = ph
+        t["updated_at"] = _now()
+        if reason:
+            ev = list(t.get("evidence") or [])
+            ev.append({"at": _now(), "kind": "phase",
+                       "note": f"phase {prev} -> {ph}: {reason}"})
+            t["evidence"] = ev
+        changed.append(t)
+    rec["tasks"] = tasks
+    save_route(project_root, rec)
+    fresh = load_route(project_root)
+    return [_get_task(fresh, t["id"]) for t in changed]
+
+
+def next_tasks(
+    project_root: Path,
+    *,
+    limit: int = 5,
+    priority: str | None = None,
+    phase: str | None = None,
+) -> list[dict[str, Any]]:
     rec = load_route(project_root)
     rec["tasks"] = _recompute_ready(list(rec.get("tasks") or []))
     pickable = [
@@ -804,7 +1312,18 @@ def next_tasks(project_root: Path, *, limit: int = 5) -> list[dict[str, Any]]:
         for t in rec["tasks"]
         if t.get("status") == "ready" and t.get("pickable") is True
     ]
+    if phase is not None:
+        pickable = [t for t in pickable if (t.get("phase") or "") == phase]
+    if priority is not None:
+        if priority not in PRIORITY_RANK:
+            raise ValueError(f"priority must be one of {list(TASK_PRIORITIES)}")
+        pickable = [t for t in pickable if (t.get("priority") or DEFAULT_PRIORITY) == priority]
+    # Stable sort by priority only: within a rank, insertion order (the
+    # historical behaviour) is preserved, so this is purely additive.
+    pickable.sort(key=priority_rank)
     in_prog = [t for t in rec["tasks"] if t.get("status") == "in_progress"]
+    if phase is not None:
+        in_prog = [t for t in in_prog if (t.get("phase") or "") == phase]
     out = in_prog + pickable
     return out[: max(1, limit)]
 
@@ -1199,8 +1718,78 @@ def route_attention(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
     items: list[dict[str, Any]] = []
     now = datetime.now(timezone.utc)
+    by_status = {
+        t.get("id"): t.get("status")
+        for t in tasks
+        if isinstance(t, dict) and t.get("id")
+    }
     for t in tasks:
         st = t.get("status")
+        # A dep that was CANCELLED can never complete, so this task is dead,
+        # not queued — but it reads status=ready/pickable=false, which looks
+        # exactly like ordinary waiting. Blocking severity: ranking such a
+        # task p0 accomplishes nothing, `route next` will never surface it.
+        # A done task whose dep never finished means the DAG asserts an order
+        # the work did not follow: either the dep was wrong, or the completion
+        # was premature. We do NOT refuse the completion — deps are often soft
+        # ordering and a hard refusal would push agents to freehand around the
+        # route — but the discrepancy must not be silent.
+        if st == "done":
+            unmet = [
+                d
+                for d in (t.get("deps") or [])
+                if d in by_status and by_status[d] not in ("done", "cancelled")
+            ]
+            if unmet:
+                items.append(
+                    {
+                        "kind": "task_done_before_deps",
+                        "id": t.get("id"),
+                        "severity": "med",
+                        "unmet_deps": unmet,
+                        "why": (
+                            f"completed while dep(s) {', '.join(unmet)} are "
+                            "still open — either the dep is wrong (remove it) "
+                            "or this completion is premature. The DAG and the "
+                            "record disagree."
+                        ),
+                    }
+                )
+        via = t.get("unreachable_via")
+        if via and st not in ("done", "cancelled"):
+            items.append(
+                {
+                    "kind": "task_unreachable",
+                    "id": t.get("id"),
+                    "severity": "high",
+                    "priority": t.get("priority"),
+                    "root": via,
+                    "why": (
+                        f"transitively unreachable — its dep chain reaches "
+                        f"{via!r}, which is stranded on a CANCELLED dep. "
+                        f"Fix the root; this clears automatically."
+                    ),
+                }
+            )
+        dead = list(t.get("waiting_on_cancelled") or [])
+        if dead and st not in ("done", "cancelled"):
+            items.append(
+                {
+                    "kind": "task_dep_cancelled",
+                    "id": t.get("id"),
+                    "severity": "block",
+                    "priority": t.get("priority"),
+                    "cancelled_deps": dead,
+                    "why": (
+                        f"dep(s) {', '.join(dead)} are CANCELLED and can never "
+                        "complete — this task is UNREACHABLE, not queued. "
+                        "`route next` will never surface it at any priority. "
+                        "Decide: re-point the dep onto the live successor "
+                        "(route add … --dep <successor>), or cancel this task "
+                        "too if its premise died with the dep."
+                    ),
+                }
+            )
         if st == "blocked":
             items.append(
                 {
@@ -1288,9 +1877,14 @@ def route_log(
         }
         entries = list(t.get("evidence") or [])
         for entry in entries:
+            # Honour the entry's own kind. This defaulted to "complete" for
+            # every evidence row, so a non-completion event (priority
+            # re-rank) would have been rendered in the timeline as a
+            # COMPLETION. Legacy entries carry no kind and still read
+            # "complete", so this is backward-compatible.
             ev: dict[str, Any] = {
                 "at": entry.get("at"),
-                "kind": "complete",
+                "kind": entry.get("kind") or "complete",
                 **base,
             }
             for key in ("note", "runs", "knowns", "freehand"):
@@ -1331,6 +1925,18 @@ def route_status(project_root: Path) -> dict[str, Any]:
         by_status[st] = by_status.get(st, 0) + 1
     pickable = [t for t in tasks if t.get("pickable") is True]
     blocked = [t for t in tasks if t.get("status") == "blocked"]
+    # `next` is now priority-SORTED under a limit, so low-priority work can sit
+    # unseen behind a full page of p0. Rollup-before-sample (sitrep §19.2):
+    # counts are never truncated, so nothing hides behind the window.
+    open_tasks = [
+        t for t in tasks if t.get("status") in ("ready", "blocked", "in_progress")
+    ]
+    by_priority = {p: 0 for p in TASK_PRIORITIES}
+    pickable_by_priority = {p: 0 for p in TASK_PRIORITIES}
+    for t in open_tasks:
+        by_priority[t.get("priority") or DEFAULT_PRIORITY] += 1
+    for t in pickable:
+        pickable_by_priority[t.get("priority") or DEFAULT_PRIORITY] += 1
     return {
         "command": "route.status",
         "brief_version": rec.get("brief_version"),
@@ -1339,14 +1945,95 @@ def route_status(project_root: Path) -> dict[str, Any]:
         "counts": {
             "tasks": len(tasks),
             "by_status": by_status,
+            "by_priority_open": by_priority,
+            "by_priority_pickable": pickable_by_priority,
             "pickable": len(pickable),
             "blocked": len(blocked),
             "in_progress": by_status.get("in_progress", 0),
             "done": by_status.get("done", 0),
         },
         "budget": budget_rollup(project_root, tasks),
+        "phases": phase_rollup(project_root, tasks),
         "next": next_tasks(project_root, limit=5),
         "blocked": blocked,
-        "attention": route_attention(tasks),
+        "attention": route_attention(tasks) + _phase_attention(project_root, tasks),
         "tasks": tasks,
     }
+
+
+def _phase_attention(
+    project_root: Path, tasks: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Phase drift + exit readiness.
+
+    Only speaks when the project actually declares phases — a project not
+    using them must not be nagged into it.
+    """
+    roll = phase_rollup(project_root, tasks)
+    if not roll["declared"]:
+        return []
+    items: list[dict[str, Any]] = []
+    for pid in roll["undeclared_used"]:
+        items.append(
+            {
+                "kind": "task_phase_undeclared",
+                "id": pid,
+                "severity": "med",
+                "why": (
+                    f"tasks carry phase {pid!r} which is NOT declared in the "
+                    "brief — free-text drift. It will never be reported as "
+                    "the current phase. Declare it (terra brief phase) or "
+                    "re-tag those tasks."
+                ),
+            }
+        )
+    cur = roll["current"]
+    for r in roll["phases"]:
+        # Declaring a phase closed does NOT retire its tasks. If open work
+        # remains, the lifecycle has moved on while the work is still live —
+        # either the closure was premature or that work belongs elsewhere.
+        # Blocking severity: this is the one way phase closure can lie.
+        if r["closed"] and r["open"]:
+            items.append(
+                {
+                    "kind": "phase_closed_with_open_work",
+                    "id": r["id"],
+                    "severity": "block",
+                    "open": r["open"],
+                    "why": (
+                        f"phase {r['id']!r} is declared CLOSED but still holds "
+                        f"{r['open']} open task(s). Closure does not retire "
+                        "tasks. Either re-tag that work to a live phase, "
+                        "cancel it, or re-open the phase "
+                        "(terra brief phase-close <id> --reopen --reason …)."
+                    ),
+                }
+            )
+        if r["id"] == cur and r["unreachable"]:
+            items.append(
+                {
+                    "kind": "phase_exit_blocked_by_unreachable",
+                    "id": r["id"],
+                    "severity": "high",
+                    "why": (
+                        f"current phase {r['id']!r} has {r['unreachable']} "
+                        f"UNREACHABLE task(s) of {r['open']} open — this "
+                        "phase can never exit on its own. Fix the cancelled "
+                        "deps (kind=task_dep_cancelled) or cancel those tasks."
+                    ),
+                }
+            )
+    if roll["unphased_open"]:
+        items.append(
+            {
+                "kind": "tasks_unphased",
+                "severity": "info",
+                "count": roll["unphased_open"],
+                "why": (
+                    f"{roll['unphased_open']} open task(s) carry no phase — "
+                    "invisible to phase exit criteria. They will never block "
+                    "a phase exit, and never be counted as its work."
+                ),
+            }
+        )
+    return items
